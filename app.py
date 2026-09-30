@@ -10,10 +10,12 @@ import math
 import mimetypes
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import uuid
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -33,7 +35,7 @@ MEDIA_FILES: dict[str, Path] = {}
 MEDIA_FILES_LOCK = threading.Lock()
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
-FPS = 30
+DEFAULT_FPS = 30
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("makeshort")
@@ -101,19 +103,42 @@ def parse_timestamp(value: object, name: str) -> Decimal:
     return seconds
 
 
-def make_filter(mode: str) -> str:
+def make_filter(mode: str, fps: str = str(DEFAULT_FPS)) -> str:
     if mode == "fill":
         return (
             f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=increase:"
-            f"force_divisible_by=2,crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},setsar=1,fps=30"
+            f"force_divisible_by=2,crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},setsar=1,fps={fps}"
         )
     if mode == "fit":
         return (
             f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease:"
             f"force_divisible_by=2,pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
-            "setsar=1,fps=30"
+            f"setsar=1,fps={fps}"
         )
     raise RequestError("화면 비율 옵션을 선택해 주세요.")
+
+
+def probe_video_fps(video_path: Path) -> tuple[str, float]:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate,r_frame_rate", "-of", "json", str(video_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    streams = json.loads(result.stdout).get("streams", [])
+    if not streams:
+        return str(DEFAULT_FPS), float(DEFAULT_FPS)
+    stream = streams[0]
+    for value in (stream.get("avg_frame_rate"), stream.get("r_frame_rate")):
+        try:
+            rate = Fraction(value)
+            numeric_rate = float(rate)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        if math.isfinite(numeric_rate) and 1 <= numeric_rate <= 120:
+            return str(rate), numeric_rate
+    return str(DEFAULT_FPS), float(DEFAULT_FPS)
 
 
 def send_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, str]) -> None:
@@ -244,7 +269,8 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             if end <= start:
                 raise RequestError("종료 시간은 시작 시간보다 뒤여야 합니다.")
             mode = request.get("mode")
-            video_filter = make_filter(mode) if isinstance(mode, str) else make_filter("")
+            if not isinstance(mode, str) or mode not in {"fill", "fit"}:
+                raise RequestError("화면 비율 옵션을 선택해 주세요.")
         except (json.JSONDecodeError, UnicodeDecodeError):
             send_json(self, 400, {"error": "요청 내용을 확인해 주세요."})
             return
@@ -276,6 +302,8 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                 if not candidates:
                     raise RuntimeError("yt-dlp completed without an output file")
                 source = candidates[0]
+                fps_expression, fps_value = probe_video_fps(source)
+                video_filter = make_filter(mode, fps_expression)
                 output = Path(temp_dir) / "makeshort_clip.mp4"
                 duration = end - start
                 command = [
@@ -290,7 +318,6 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                 result = shutil.which("ffmpeg")
                 if not result:
                     raise RuntimeError("ffmpeg was not found on PATH")
-                import subprocess
                 subprocess.run(command, check=True, capture_output=True, timeout=3600)
                 if not output.is_file() or output.stat().st_size == 0:
                     raise RuntimeError("ffmpeg did not produce a clip")
@@ -299,6 +326,7 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "video/mp4")
                 self.send_header("Content-Length", str(output.stat().st_size))
                 self.send_header("Content-Disposition", 'attachment; filename="makeshort_clip.mp4"')
+                self.send_header("X-Makeshort-FPS", f"{fps_value:.9f}".rstrip("0").rstrip("."))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 with output.open("rb") as clip:
@@ -371,7 +399,6 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                     "--concurrency", "2",
                 ]
                 logger.info("Rendering Remotion composition for %s", media_key)
-                import subprocess
                 result = subprocess.run(
                     command, cwd=ROOT, capture_output=True, text=True, timeout=7200,
                 )
@@ -410,10 +437,13 @@ def validate_render_props(props: object) -> dict[str, object]:
     if not isinstance(props, dict):
         raise RequestError("텍스트 설정을 확인해 주세요.")
     try:
+        frame_rate = float(props.get("fps", DEFAULT_FPS))
         duration_frames = int(props.get("durationInFrames", 0))
     except (TypeError, ValueError):
-        raise RequestError("클립 길이를 확인해 주세요.") from None
-    if duration_frames < 1 or duration_frames > FPS * 3600:
+        raise RequestError("클립의 프레임레이트와 길이를 확인해 주세요.") from None
+    if not math.isfinite(frame_rate) or frame_rate < 1 or frame_rate > 120:
+        raise RequestError("프레임레이트를 확인해 주세요.")
+    if duration_frames < 1 or duration_frames > frame_rate * 3600:
         raise RequestError("클립 길이는 1초 이상 1시간 이하여야 합니다.")
     captions = props.get("captions", [])
     if not isinstance(captions, list) or len(captions) > 120:
@@ -428,7 +458,7 @@ def validate_render_props(props: object) -> dict[str, object]:
     animations = {"none", "fade", "pop", "typewriter"}
     decorations = {"none", "shadow", "outline", "box"}
     checked: list[dict[str, object]] = []
-    duration_seconds = duration_frames / FPS
+    duration_seconds = duration_frames / frame_rate
     for caption in captions:
         if not isinstance(caption, dict):
             raise RequestError("텍스트 레이어 설정을 확인해 주세요.")
@@ -489,7 +519,7 @@ def validate_render_props(props: object) -> dict[str, object]:
             "animation": animation,
             "decoration": decoration,
         })
-    return {"durationInFrames": duration_frames, "captions": checked}
+    return {"fps": frame_rate, "durationInFrames": duration_frames, "captions": checked}
 
 
 def main() -> None:

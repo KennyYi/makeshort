@@ -10,6 +10,10 @@ export const RemotionRoot = () => (
     height={1920}
     fps={30}
     durationInFrames={90}
-    defaultProps={{ src: "", captions: [], selectedId: null }}
+    calculateMetadata={({ props }) => ({
+      fps: props.fps ?? 30,
+      durationInFrames: props.durationInFrames ?? 90,
+    })}
+    defaultProps={{ src: "", captions: [], selectedId: null, fps: 30, durationInFrames: 90 }}
   />
 );

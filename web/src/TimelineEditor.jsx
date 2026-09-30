@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Player } from "@remotion/player";
 import { CaptionVideo } from "./remotion/CaptionVideo.jsx";
 
-const FPS = 30;
+const DEFAULT_FPS = 30;
 const POSITION_LABELS = [
   ["top-left", "위 왼쪽", 5, 5, 0, 0], ["top-center", "위 가운데", 50, 5, 0.5, 0], ["top-right", "위 오른쪽", 95, 5, 1, 0],
   ["middle-left", "중간 왼쪽", 5, 50, 0, 0.5], ["middle-center", "중간 가운데", 50, 50, 0.5, 0.5], ["middle-right", "중간 오른쪽", 95, 50, 1, 0.5],
@@ -58,6 +58,7 @@ export const TimelineEditor = () => {
   const [clipUrl, setClipUrl] = useState("");
   const [clipName, setClipName] = useState("");
   const [duration, setDuration] = useState(0);
+  const [frameRate, setFrameRate] = useState(DEFAULT_FPS);
   const [captions, setCaptions] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [currentFrame, setCurrentFrame] = useState(0);
@@ -69,7 +70,7 @@ export const TimelineEditor = () => {
   const timelineContentRef = useRef(null);
   const dragRef = useRef(null);
 
-  const durationInFrames = Math.max(1, Math.ceil(duration * FPS));
+  const durationInFrames = Math.max(1, Math.ceil(duration * frameRate));
   const selectedCaption = captions.find((caption) => caption.id === selectedId) ?? null;
   const timelineWidth = Math.max(720, duration * 28);
   const rulerTicks = useMemo(() => {
@@ -88,6 +89,7 @@ export const TimelineEditor = () => {
     });
     setClipName(detail.name || "클립");
     setDuration(detail.duration);
+    setFrameRate(Number.isFinite(detail.fps) && detail.fps >= 1 && detail.fps <= 120 ? detail.fps : DEFAULT_FPS);
     setCaptions([]);
     setSelectedId(null);
     setCurrentFrame(0);
@@ -253,10 +255,10 @@ export const TimelineEditor = () => {
 
   const selectCaption = (caption) => {
     setSelectedId(caption.id);
-    const time = currentFrame / FPS;
+    const time = currentFrame / frameRate;
     if (time < caption.start || time >= caption.end || time - caption.start < 0.2) {
       const previewTime = caption.start + Math.min(0.25, (caption.end - caption.start) / 2);
-      const targetFrame = Math.min(Math.ceil(caption.end * FPS) - 1, Math.round(previewTime * FPS));
+      const targetFrame = Math.min(Math.ceil(caption.end * frameRate) - 1, Math.round(previewTime * frameRate));
       playerRef.current?.seekTo(Math.max(0, targetFrame));
       setCurrentFrame(Math.max(0, targetFrame));
     }
@@ -284,6 +286,7 @@ export const TimelineEditor = () => {
     setRendering(true);
     try {
       const props = {
+        fps: frameRate,
         durationInFrames,
         captions: captions.map(({ id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration }) => ({
           id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration,
@@ -339,6 +342,7 @@ export const TimelineEditor = () => {
     setCaptions([]);
     setSelectedId(null);
     setDuration(0);
+    setFrameRate(DEFAULT_FPS);
     setError("");
     document.querySelector("#clip-form").reset();
     document.querySelector("#import-clip-input").value = "";
@@ -365,14 +369,14 @@ export const TimelineEditor = () => {
 
       <div className="editor-stage">
         <section className="player-panel" aria-label="영상 미리보기">
-          <div className="player-topline"><span>REMOTION PREVIEW</span><span>9:16 · 1080 × 1920</span></div>
+          <div className="player-topline"><span>REMOTION PREVIEW</span><span>9:16 · 1080 × 1920 · {frameRate.toFixed(2).replace(/\.00$/, "")}fps</span></div>
           <div className="remotion-player-wrap" ref={playerWrapRef}>
             <Player
               ref={playerRef}
               component={CaptionVideo}
               inputProps={{ src: clipUrl, captions, selectedId, onCaptionPointerDown: beginPositionDrag, onCaptionPointerMove: movePositionDrag, onCaptionPointerUp: finishPositionDrag }}
               durationInFrames={durationInFrames}
-              fps={FPS}
+              fps={frameRate}
               compositionWidth={1080}
               compositionHeight={1920}
               controls
@@ -449,7 +453,7 @@ export const TimelineEditor = () => {
       </div>
 
       <section className="timeline-panel" aria-label="텍스트 타임라인">
-        <div className="timeline-heading"><div><span className="section-index">EDIT TIMING</span><h3>타임라인</h3></div><div className="timeline-legend"><span><i className="video-legend" />영상</span><span><i className="text-legend" />텍스트</span><span className="timeline-clock">{formatTime(currentFrame / FPS)} <b>/</b> {formatTime(duration)}</span></div></div>
+        <div className="timeline-heading"><div><span className="section-index">EDIT TIMING</span><h3>타임라인</h3></div><div className="timeline-legend"><span><i className="video-legend" />영상</span><span><i className="text-legend" />텍스트</span><span className="timeline-clock">{formatTime(currentFrame / frameRate)} <b>/</b> {formatTime(duration)}</span></div></div>
         <div className="timeline-scroll">
           <div className="timeline-board" ref={timelineContentRef} style={{ width: `${timelineWidth}px` }} onClick={seekTimeline}>
             <div className="timeline-ruler"><div className="track-name ruler-label">시간</div><div className="track-lane ruler-lane">{rulerTicks.map((second) => <span className="ruler-tick" key={second} style={{ left: `${(second / duration) * 100}%` }}><i />{formatTime(second)}</span>)}</div></div>
