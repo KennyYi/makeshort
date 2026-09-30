@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f5f4f0" />
+    <title>makeshort — 긴 영상에서 필요한 순간만</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;600;700;800;900&family=Noto+Serif+KR:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="makeshort 홈">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>makeshort</span>
+        </a>
+        <div class="topbar-note"><span class="status-dot"></span> 간편 클립 메이커</div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div class="eyebrow"><span>01</span> YOUTUBE CLIP MAKER</div>
+          <h1>긴 영상에서<br /><em>필요한 순간만.</em></h1>
+          <p class="hero-copy">유튜브 링크와 시작, 종료 시간을 입력하면<br class="desktop-break" /> 세로 화면에 맞는 짧은 클립으로 만들어 드려요.</p>
+        </section>
+
+        <section class="workspace" aria-label="유튜브 클립 만들기">
+          <form class="editor-card" id="clip-form">
+            <div class="card-heading">
+              <div>
+                <span class="section-index">STEP 01</span>
+                <h2>영상 구간 선택</h2>
+              </div>
+              <span class="youtube-icon" aria-label="YouTube">▶</span>
+            </div>
+
+            <label class="field-label" for="youtube-url">유튜브 링크</label>
+            <div class="url-field field-wrap">
+              <span class="field-icon link-icon" aria-hidden="true">↗</span>
+              <input id="youtube-url" name="url" type="url" placeholder="https://youtube.com/watch?v=..." autocomplete="url" required />
+              <button class="paste-button" id="paste-button" type="button">붙여넣기</button>
+            </div>
+
+            <div class="time-heading">
+              <label class="field-label" for="start-time">잘라낼 시간</label>
+              <span class="format-hint">MM:SS 또는 초 단위</span>
+            </div>
+            <div class="time-range">
+              <div class="time-input-block">
+                <label for="start-time">START FROM</label>
+                <div class="field-wrap time-field">
+                  <input id="start-time" name="start" type="text" inputmode="decimal" placeholder="00:00" value="00:00" required />
+                  <span class="time-stamp-icon" aria-hidden="true">◷</span>
+                </div>
+              </div>
+              <span class="range-dash" aria-hidden="true">—</span>
+              <div class="time-input-block">
+                <label for="end-time">END TO</label>
+                <div class="field-wrap time-field">
+                  <input id="end-time" name="end" type="text" inputmode="decimal" placeholder="01:00" required />
+                  <span class="time-stamp-icon" aria-hidden="true">◷</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+            <div class="time-heading framing-heading">
+              <div>
+                <span class="section-index">STEP 02</span>
+                <h2>세로 화면 구성</h2>
+              </div>
+              <span class="aspect-tag">9:16 PORTRAIT</span>
+            </div>
+
+            <fieldset class="mode-options">
+              <legend class="sr-only">영상 화면 구성 방식</legend>
+              <label class="mode-card selected" for="mode-fill">
+                <input id="mode-fill" type="radio" name="mode" value="fill" checked />
+                <span class="mode-visual fill-visual"><i></i></span>
+                <span class="mode-copy"><strong>세로 화면 채우기</strong><small>화면을 꽉 채우고 좌우를 자릅니다</small></span>
+                <span class="radio-mark" aria-hidden="true"></span>
+              </label>
+              <label class="mode-card" for="mode-fit">
+                <input id="mode-fit" type="radio" name="mode" value="fit" />
+                <span class="mode-visual fit-visual"><i></i></span>
+                <span class="mode-copy"><strong>전체 영상 담기</strong><small>가운데 배치하고 위아래를 검게 채웁니다</small></span>
+                <span class="radio-mark" aria-hidden="true"></span>
+              </label>
+            </fieldset>
+
+            <button class="create-button" id="create-button" type="submit">
+              <span class="button-label">세로 클립 만들기</span>
+              <span class="button-arrow" aria-hidden="true">↗</span>
+            </button>
+            <p class="form-footnote"><span aria-hidden="true">✦</span> MP4 · 1080 × 1920 · Remotion 텍스트 편집</p>
+            <div class="form-error" id="form-error" role="alert" hidden></div>
+            <div class="import-clip-row">
+              <span>이미 저장된 클립이 있나요?</span>
+              <button type="button" id="import-clip-button">MP4 불러오기 <span aria-hidden="true">↗</span></button>
+              <input id="import-clip-input" type="file" accept="video/mp4,video/quicktime,video/*" hidden />
+            </div>
+          </form>
+
+          <aside class="preview-column">
+            <div class="preview-heading">
+              <div><span class="section-index">PREVIEW</span><h2>세로 화면 미리보기</h2></div>
+              <span class="live-pill"><i></i> LIVE</span>
+            </div>
+            <div class="phone-frame" id="phone-frame">
+              <div class="phone-screen fill-preview" id="preview-screen">
+              <div class="preview-empty" id="preview-empty">
+                <span class="preview-play">▶</span>
+                <span>영상 구간을 선택하면<br />텍스트 편집기로 이동해요</span>
+              </div>
+                <video id="result-video" controls playsinline hidden></video>
+                <div class="screen-caption" id="screen-caption"><span>MAKESHORT</span><b>9:16</b></div>
+              </div>
+              <span class="phone-camera" aria-hidden="true"></span>
+            </div>
+            <div class="preview-meta">
+              <span class="meta-label">OUTPUT FORMAT</span>
+              <div><span>세로형 MP4</span><span class="meta-separator">·</span><span>1080 × 1920</span></div>
+            </div>
+            <div class="tip-card"><span class="tip-icon">✳</span><p><strong>TIP</strong> 세로 화면 채우기는 인물이나 장면을 크게 보여줘요.</p></div>
+          </aside>
+        </section>
+        <section id="timeline-editor-root" class="timeline-editor-root" hidden></section>
+      </main>
+
+      <footer class="footer"><span>makeshort</span><span>필요한 장면을, 더 짧고 선명하게.</span></footer>
+    </div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

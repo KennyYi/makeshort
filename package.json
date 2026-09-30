@@ -1,0 +1,19 @@
+{
+  "name": "makeshort",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.js",
+    "build": "vite build --config vite.config.js",
+    "remotion:studio": "remotion studio web/src/remotion/index.jsx"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.529",
+    "@remotion/player": "4.0.529",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.529",
+    "vite": "7.3.6"
+  }
+}
