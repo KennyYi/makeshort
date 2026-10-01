@@ -1,7 +1,7 @@
 import React from "react";
 import {
   AbsoluteFill,
-  Html5Video,
+  OffthreadVideo,
   Sequence,
   interpolate,
   spring,
@@ -103,7 +103,7 @@ export const CaptionVideo = ({ src, captions = [], selectedId = null, onCaptionP
   const { fps, durationInFrames } = useVideoConfig();
   return (
     <AbsoluteFill style={{ backgroundColor: "#000", overflow: "hidden" }}>
-      <Html5Video src={src} style={{ width: "100%", height: "100%", objectFit: "fill" }} />
+      <OffthreadVideo src={src} style={{ width: "100%", height: "100%", objectFit: "fill" }} />
       {captions.map((caption) => {
         const from = Math.max(0, Math.round(caption.start * fps));
         const end = Math.min(durationInFrames, Math.round(caption.end * fps));

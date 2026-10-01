@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import yt_dlp
 
@@ -141,6 +141,156 @@ def probe_video_fps(video_path: Path) -> tuple[str, float]:
     return str(DEFAULT_FPS), float(DEFAULT_FPS)
 
 
+def download_youtube_source(video_id: str, temp_root: Path) -> tuple[Path, str]:
+    source_template = str(temp_root / "source.%(ext)s")
+    options = {
+        "format": "bv*+ba/b",
+        "outtmpl": source_template,
+        "merge_output_format": "mkv",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 2,
+    }
+    logger.info("Downloading YouTube video %s", video_id)
+    with yt_dlp.YoutubeDL(options) as downloader:
+        video_info = downloader.extract_info(
+            f"https://www.youtube.com/watch?v={video_id}", download=True,
+        )
+
+    title = video_info.get("title") if isinstance(video_info, dict) else None
+    if not isinstance(title, str) or not title.strip():
+        title = "YouTube 클립"
+    candidates = [
+        path for path in temp_root.glob("source.*")
+        if path.is_file() and not path.name.endswith((".part", ".ytdl"))
+    ]
+    if not candidates:
+        raise RuntimeError("yt-dlp completed without an output file")
+    return candidates[0], title
+
+
+def create_portrait_clip(source: Path, output: Path, start: Decimal, end: Decimal, mode: str) -> float:
+    fps_expression, fps_value = probe_video_fps(source)
+    video_filter = make_filter(mode, fps_expression)
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg was not found on PATH")
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", str(start), "-i", str(source), "-t", str(end - start),
+        "-map", "0:v:0", "-map", "0:a?", "-vf", video_filter,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        "-pix_fmt", "yuv420p", str(output),
+    ]
+    logger.info("Creating %s clip (%s to %s)", mode, start, end)
+    subprocess.run(command, check=True, capture_output=True, timeout=3600)
+    if not output.is_file() or output.stat().st_size == 0:
+        raise RuntimeError("ffmpeg did not produce a clip")
+    return fps_value
+
+
+def probe_video_frame_count(video_path: Path) -> int:
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+            "-show_entries", "stream=nb_read_frames", "-of", "json", str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=3600,
+    )
+    streams = json.loads(result.stdout).get("streams", [])
+    if not streams:
+        raise RuntimeError("ffprobe did not find a video stream")
+    try:
+        frame_count = int(streams[0].get("nb_read_frames", "0"))
+    except (TypeError, ValueError):
+        frame_count = 0
+    if frame_count < 1:
+        raise RuntimeError("ffprobe could not determine the clip frame count")
+    return frame_count
+
+
+def normalize_api_captions(value: object) -> list[dict[str, object]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 120:
+        raise RequestError("자막은 최대 120개까지 설정할 수 있습니다.")
+
+    defaults: dict[str, object] = {
+        "font": "noto",
+        "fontSize": 72,
+        "color": "#ffffff",
+        "position": "bottom-center",
+        "boxWidth": 84,
+        "boxHeight": 10,
+        "animation": "fade",
+        "decoration": "shadow",
+    }
+    captions = []
+    used_ids: set[str] = set()
+    for index, value_item in enumerate(value, start=1):
+        if not isinstance(value_item, dict):
+            raise RequestError("자막 설정은 JSON 객체여야 합니다.")
+        caption = {**defaults, **value_item}
+        caption_id = caption.get("id") or f"caption_{index}"
+        if not isinstance(caption_id, str) or caption_id in used_ids:
+            raise RequestError("자막 ID는 중복되지 않는 문자열이어야 합니다.")
+        used_ids.add(caption_id)
+        caption["id"] = caption_id
+        captions.append(caption)
+    return captions
+
+
+def safe_video_filename(title: str) -> str:
+    cleaned = re.sub(r"\.(?:mp4|mov|m4v)$", "", title.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", cleaned)
+    cleaned = re.sub(r"[. ]+$", "", cleaned)[:180].strip()
+    return f"{cleaned or 'makeshort_clip'}.mp4"
+
+
+def render_video_with_remotion(
+    source_path: Path,
+    output_path: Path,
+    props_path: Path,
+    props: dict[str, object],
+    server_port: int,
+) -> None:
+    remotion_cli = ROOT / "node_modules" / ".bin" / "remotion"
+    if not remotion_cli.exists():
+        raise FileNotFoundError("Remotion CLI was not found")
+
+    media_key = uuid.uuid4().hex
+    props["src"] = f"http://{HOST}:{server_port}/api/media/{media_key}"
+    props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
+    with MEDIA_FILES_LOCK:
+        MEDIA_FILES[media_key] = source_path
+
+    command = [
+        str(remotion_cli), "render", str(ROOT / "web" / "src" / "remotion" / "index.jsx"),
+        "CaptionedClip", str(output_path), "--props", str(props_path),
+        "--duration", str(props["durationInFrames"]), "--codec", "h264", "--crf", "18",
+        "--concurrency", "2",
+    ]
+    try:
+        logger.info("Rendering Remotion composition for %s", media_key)
+        result = subprocess.run(
+            command, cwd=ROOT, capture_output=True, text=True, timeout=7200,
+        )
+        if result.returncode != 0:
+            logger.error("Remotion render failed: %s", result.stderr[-6000:])
+            raise RuntimeError("Remotion render failed")
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("Remotion completed without an output file")
+    finally:
+        with MEDIA_FILES_LOCK:
+            MEDIA_FILES.pop(media_key, None)
+
+
 def send_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, str]) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -244,6 +394,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_POST(self) -> None:
+        if self.path == "/api/create":
+            self.create_composite()
+            return
         if self.path == "/api/render":
             self.render_composite()
             return
@@ -280,53 +433,16 @@ class MakeShortHandler(BaseHTTPRequestHandler):
 
         try:
             with tempfile.TemporaryDirectory(prefix="makeshort-") as temp_dir:
-                source_template = str(Path(temp_dir) / "source.%(ext)s")
-                options = {
-                    "format": "bv*+ba/b",
-                    "outtmpl": source_template,
-                    "merge_output_format": "mkv",
-                    "noplaylist": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "socket_timeout": 30,
-                    "retries": 2,
-                }
-                logger.info("Downloading YouTube video %s", video_id)
-                with yt_dlp.YoutubeDL(options) as downloader:
-                    downloader.download([f"https://www.youtube.com/watch?v={video_id}"])
-
-                candidates = [
-                    path for path in Path(temp_dir).glob("source.*")
-                    if path.is_file() and not path.name.endswith((".part", ".ytdl"))
-                ]
-                if not candidates:
-                    raise RuntimeError("yt-dlp completed without an output file")
-                source = candidates[0]
-                fps_expression, fps_value = probe_video_fps(source)
-                video_filter = make_filter(mode, fps_expression)
-                output = Path(temp_dir) / "makeshort_clip.mp4"
-                duration = end - start
-                command = [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-ss", str(start), "-i", str(source), "-t", str(duration),
-                    "-map", "0:v:0", "-map", "0:a?", "-vf", video_filter,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-                    "-pix_fmt", "yuv420p", str(output),
-                ]
-                logger.info("Creating %s clip (%s to %s)", mode, start, end)
-                result = shutil.which("ffmpeg")
-                if not result:
-                    raise RuntimeError("ffmpeg was not found on PATH")
-                subprocess.run(command, check=True, capture_output=True, timeout=3600)
-                if not output.is_file() or output.stat().st_size == 0:
-                    raise RuntimeError("ffmpeg did not produce a clip")
+                temp_root = Path(temp_dir)
+                source, video_title = download_youtube_source(video_id, temp_root)
+                output = temp_root / "makeshort_clip.mp4"
+                fps_value = create_portrait_clip(source, output, start, end, mode)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
                 self.send_header("Content-Length", str(output.stat().st_size))
-                self.send_header("Content-Disposition", 'attachment; filename="makeshort_clip.mp4"')
                 self.send_header("X-Makeshort-FPS", f"{fps_value:.9f}".rstrip("0").rstrip("."))
+                self.send_header("X-Makeshort-Title", quote(video_title, safe=""))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 with output.open("rb") as clip:
@@ -339,6 +455,105 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             if not self.wfile.closed:
                 try:
                     send_json(self, 500, {"error": "클립을 만드는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+    def create_composite(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            send_json(self, 400, {"error": "JSON 요청 크기를 확인해 주세요."})
+            return
+        if length <= 0 or length > 262_144:
+            send_json(self, 413, {"error": "JSON 요청은 256KB 이하여야 합니다."})
+            return
+
+        try:
+            request = json.loads(self.rfile.read(length))
+            if not isinstance(request, dict):
+                raise RequestError("요청 본문은 JSON 객체여야 합니다.")
+            video_id = youtube_video_id(request.get("url"))
+            start = parse_timestamp(request.get("start"), "시작")
+            end = parse_timestamp(request.get("end"), "종료")
+            if end <= start:
+                raise RequestError("종료 시간은 시작 시간보다 뒤여야 합니다.")
+            if end - start > 3600:
+                raise RequestError("한 번에 만들 수 있는 클립은 최대 1시간입니다.")
+            mode = request.get("mode", "fill")
+            if not isinstance(mode, str) or mode not in {"fill", "fit"}:
+                raise RequestError("mode는 fill 또는 fit이어야 합니다.")
+            requested_title = request.get("title", "")
+            if not isinstance(requested_title, str) or len(requested_title) > 500:
+                raise RequestError("title은 500자 이내의 문자열이어야 합니다.")
+            captions = normalize_api_captions(request.get("captions", []))
+            provisional_duration = max(1, round(float(end - start) * DEFAULT_FPS))
+            validate_render_props({
+                "fps": DEFAULT_FPS,
+                "durationInFrames": provisional_duration,
+                "captions": captions,
+            })
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            send_json(self, 400, {"error": "요청 본문이 올바른 JSON이 아닙니다."})
+            return
+        except RequestError as exc:
+            send_json(self, 400, {"error": str(exc)})
+            return
+
+        if not (ROOT / "node_modules" / ".bin" / "remotion").exists():
+            send_json(self, 503, {"error": "Remotion 설치가 필요합니다. README의 npm 설치 명령을 실행해 주세요."})
+            return
+
+        response_started = False
+        try:
+            with tempfile.TemporaryDirectory(prefix="makeshort-api-") as temp_dir:
+                temp_root = Path(temp_dir)
+                source, youtube_title = download_youtube_source(video_id, temp_root)
+                clip_path = temp_root / "clip.mp4"
+                fps = create_portrait_clip(source, clip_path, start, end, mode)
+                frame_count = probe_video_frame_count(clip_path)
+                props = validate_render_props({
+                    "fps": fps,
+                    "durationInFrames": frame_count,
+                    "captions": captions,
+                })
+                title = requested_title.strip() or youtube_title
+                output_path = temp_root / "captioned.mp4"
+                props_path = temp_root / "props.json"
+                render_video_with_remotion(
+                    clip_path,
+                    output_path,
+                    props_path,
+                    props,
+                    self.server.server_port,
+                )
+
+                filename = safe_video_filename(title)
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(output_path.stat().st_size))
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename=\"makeshort_clip.mp4\"; filename*=UTF-8''{quote(filename, safe='')}",
+                )
+                self.send_header("X-Makeshort-FPS", f"{fps:.9f}".rstrip("0").rstrip("."))
+                self.send_header("X-Makeshort-Title", quote(title, safe=""))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                response_started = True
+                with output_path.open("rb") as output_file:
+                    shutil.copyfileobj(output_file, self.wfile, length=1024 * 1024)
+        except yt_dlp.utils.DownloadError:
+            logger.exception("YouTube download failed for %s", video_id)
+            if not response_started:
+                send_json(self, 422, {"error": "영상을 가져오지 못했습니다. 공개 영상인지, 링크가 정확한지 확인해 주세요."})
+        except RequestError as exc:
+            if not response_started:
+                send_json(self, 400, {"error": str(exc)})
+        except Exception:
+            logger.exception("Clip composition failed for %s", video_id)
+            if not response_started and not self.wfile.closed:
+                try:
+                    send_json(self, 500, {"error": "클립을 합성하는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
@@ -370,7 +585,6 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             send_json(self, 503, {"error": "Remotion 설치가 필요합니다. README의 npm 설치 명령을 실행해 주세요."})
             return
 
-        media_key = uuid.uuid4().hex
         response_started = False
         try:
             with tempfile.TemporaryDirectory(prefix="makeshort-render-") as temp_dir:
@@ -387,27 +601,13 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                         video_file.write(chunk)
                         remaining -= len(chunk)
 
-                props["src"] = f"http://{HOST}:{self.server.server_port}/api/media/{media_key}"
-                props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
-                with MEDIA_FILES_LOCK:
-                    MEDIA_FILES[media_key] = input_path
-
-                command = [
-                    str(remotion_cli), "render", str(ROOT / "web" / "src" / "remotion" / "index.jsx"),
-                    "CaptionedClip", str(output_path), "--props", str(props_path),
-                    "--duration", str(props["durationInFrames"]), "--codec", "h264", "--crf", "18",
-                    "--concurrency", "2",
-                ]
-                logger.info("Rendering Remotion composition for %s", media_key)
-                result = subprocess.run(
-                    command, cwd=ROOT, capture_output=True, text=True, timeout=7200,
+                render_video_with_remotion(
+                    input_path,
+                    output_path,
+                    props_path,
+                    props,
+                    self.server.server_port,
                 )
-                if result.returncode != 0:
-                    logger.error("Remotion render failed: %s", result.stderr[-6000:])
-                    send_json(self, 500, {"error": "Remotion 합성에 실패했습니다. 입력 설정을 확인한 뒤 다시 시도해 주세요."})
-                    return
-                if not output_path.is_file() or output_path.stat().st_size == 0:
-                    raise RuntimeError("Remotion completed without an output file")
 
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
@@ -425,9 +625,6 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             logger.exception("Remotion composition failed")
             if not response_started:
                 send_json(self, 500, {"error": "텍스트를 합성하는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
-        finally:
-            with MEDIA_FILES_LOCK:
-                MEDIA_FILES.pop(media_key, None)
 
     def log_message(self, format: str, *args: object) -> None:
         logger.info("%s - %s", self.address_string(), format % args)

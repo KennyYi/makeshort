@@ -46,6 +46,18 @@ const formatTime = (seconds) => {
   return `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}.${tenths}`;
 };
 
+const filenameForTitle = (title) => {
+  const safeTitle = String(title ?? "")
+    .normalize("NFC")
+    .trim()
+    .replace(/\.(?:mp4|mov|m4v)$/i, "")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .slice(0, 180)
+    .trim();
+  return `${safeTitle || "makeshort_clip"}.mp4`;
+};
+
 const encodeProps = (props) => {
   const bytes = new TextEncoder().encode(JSON.stringify(props));
   let binary = "";
@@ -53,10 +65,19 @@ const encodeProps = (props) => {
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_");
 };
 
+const downloadFile = (url, filename) => {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+};
+
 export const TimelineEditor = () => {
   const [clip, setClip] = useState(null);
   const [clipUrl, setClipUrl] = useState("");
-  const [clipName, setClipName] = useState("");
+  const [videoTitle, setVideoTitle] = useState("");
   const [duration, setDuration] = useState(0);
   const [frameRate, setFrameRate] = useState(DEFAULT_FPS);
   const [captions, setCaptions] = useState([]);
@@ -70,7 +91,8 @@ export const TimelineEditor = () => {
   const timelineContentRef = useRef(null);
   const dragRef = useRef(null);
 
-  const durationInFrames = Math.max(1, Math.ceil(duration * frameRate));
+  const durationInFrames = Math.max(1, Math.round(duration * frameRate));
+  const outputFilename = filenameForTitle(videoTitle);
   const selectedCaption = captions.find((caption) => caption.id === selectedId) ?? null;
   const timelineWidth = Math.max(720, duration * 28);
   const rulerTicks = useMemo(() => {
@@ -82,12 +104,13 @@ export const TimelineEditor = () => {
 
   const acceptClip = useCallback((detail) => {
     if (!detail?.blob || !Number.isFinite(detail.duration) || detail.duration <= 0) return;
+    const nextClipUrl = URL.createObjectURL(detail.blob);
     setClip(detail.blob);
     setClipUrl((current) => {
       if (current) URL.revokeObjectURL(current);
-      return URL.createObjectURL(detail.blob);
+      return nextClipUrl;
     });
-    setClipName(detail.name || "클립");
+    setVideoTitle(detail.title || String(detail.name || "클립").replace(/\.[^.]+$/, ""));
     setDuration(detail.duration);
     setFrameRate(Number.isFinite(detail.fps) && detail.fps >= 1 && detail.fps <= 120 ? detail.fps : DEFAULT_FPS);
     setCaptions([]);
@@ -312,7 +335,7 @@ export const TimelineEditor = () => {
       });
       const anchor = document.createElement("a");
       anchor.href = outputUrl;
-      anchor.download = "makeshort_captioned_clip.mp4";
+      anchor.download = outputFilename;
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
@@ -323,21 +346,12 @@ export const TimelineEditor = () => {
     }
   };
 
-  const downloadSource = () => {
-    if (!clipUrl) return;
-    const anchor = document.createElement("a");
-    anchor.href = clipUrl;
-    anchor.download = clipName.replace(/\.[^.]+$/, "") + ".mp4";
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-  };
-
   const resetEditor = () => {
     if (clipUrl) URL.revokeObjectURL(clipUrl);
     if (renderedUrl) URL.revokeObjectURL(renderedUrl);
     setClip(null);
     setClipUrl("");
+    setVideoTitle("");
     setRenderedUrl("");
     setCaptions([]);
     setSelectedId(null);
@@ -359,13 +373,18 @@ export const TimelineEditor = () => {
       <header className="video-editor-header">
         <div className="editor-title-wrap">
           <button type="button" className="back-button" onClick={resetEditor} aria-label="다른 영상 선택">←</button>
-          <div><span className="section-index">TEXT & TIMELINE</span><h2>자막과 텍스트 편집</h2><p>{clipName} <span>·</span> {formatTime(duration)}</p></div>
+          <div><span className="section-index">TEXT & TIMELINE</span><h2>자막과 텍스트 편집</h2><p>{formatTime(duration)}</p></div>
         </div>
         <div className="editor-header-actions">
-          <button type="button" className="quiet-button" onClick={downloadSource}>원본 클립 다운로드</button>
           <button type="button" className="add-caption-button" onClick={addCaption}>＋ 텍스트 추가</button>
         </div>
       </header>
+
+      <label className="output-title-field" htmlFor="output-video-title">
+        <span>저장할 영상 제목</span>
+        <input id="output-video-title" type="text" maxLength="180" value={videoTitle} disabled={rendering} onChange={(event) => setVideoTitle(event.target.value)} />
+        <small>유튜브 제목을 기본값으로 사용합니다. 이 제목이 MP4 파일명으로 저장됩니다.</small>
+      </label>
 
       <div className="editor-stage">
         <section className="player-panel" aria-label="영상 미리보기">
@@ -478,9 +497,9 @@ export const TimelineEditor = () => {
       </section>
 
       <div className="render-footer">
-        <div className="render-status" aria-live="polite">{rendering ? <><span className="render-spinner" />Remotion으로 합성 중입니다. 클립 길이에 따라 시간이 걸릴 수 있어요.</> : renderedUrl ? <><span className="render-success">✓</span> 합성이 끝났습니다. 완성본을 다운로드할 수 있어요.</> : <><span className="render-spark">✦</span> 미리보기 내용을 Remotion으로 합성해 MP4로 저장합니다.</>}</div>
+        <div className="render-status" aria-live="polite">{rendering ? <><span className="render-spinner" />Remotion으로 합성 중입니다. 클립 길이에 따라 시간이 걸릴 수 있어요.</> : renderedUrl ? <><span className="render-success">✓</span> 저장 완료: {outputFilename}</> : <><span className="render-spark">✦</span> 자막 합성이 끝나면 {outputFilename} 파일로 저장합니다.</>}</div>
         <div className="render-actions">
-          {renderedUrl && <button type="button" className="quiet-button" onClick={() => { const a = document.createElement("a"); a.href = renderedUrl; a.download = "makeshort_captioned_clip.mp4"; a.click(); }}>완성본 다시 받기</button>}
+          {renderedUrl && <button type="button" className="quiet-button" onClick={() => downloadFile(renderedUrl, outputFilename)}>완성본 다시 받기</button>}
           <button type="button" className="render-button" onClick={exportClip} disabled={rendering}>{rendering ? "합성 중…" : "텍스트 합성 및 다운로드"}<span aria-hidden="true">↗</span></button>
         </div>
       </div>

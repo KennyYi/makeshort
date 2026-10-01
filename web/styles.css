@@ -120,6 +120,12 @@ input::placeholder { color: #b4b5ae; }
 .video-editor-header p { margin: 0; color: #999a91; font-size: 10px; }
 .video-editor-header p span { padding: 0 4px; }
 .editor-header-actions, .render-actions { display: flex; align-items: center; gap: 8px; }
+.output-title-field { display: grid; gap: 6px; margin-top: 15px; padding: 12px 13px; border: 1px solid #eeeee8; border-radius: 10px; background: #fafaf7; }
+.output-title-field > span { color: #77796f; font-size: 9px; font-weight: 700; }
+.output-title-field input { width: 100%; height: 36px; box-sizing: border-box; padding: 0 10px; border: 1px solid #e8e8e2; border-radius: 7px; color: var(--ink); background: #fff; font: inherit; font-size: 11px; }
+.output-title-field input:focus { outline: 2px solid rgba(169,200,58,.35); border-color: #a7c340; }
+.output-title-field input:disabled { color: #92948a; background: #f4f4ef; }
+.output-title-field small { color: #999a91; font-size: 9px; }
 .quiet-button, .add-caption-button, .small-add-button { height: 36px; padding: 0 12px; border: 1px solid #e8e8e2; border-radius: 8px; color: #686a60; background: #fff; font-size: 10px; font-weight: 700; }
 .quiet-button:hover { background: #f7f7f3; }
 .add-caption-button, .small-add-button { border-color: #d9e8a1; color: #596b22; background: #f8fbe9; }

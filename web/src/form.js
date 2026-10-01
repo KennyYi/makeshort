@@ -54,9 +54,9 @@ function parseClientTime(raw) {
   return numbers[0] * 3600 + numbers[1] * 60 + numbers[2];
 }
 
-function openTimeline(blob, duration, name, fps = 30) {
+function openTimeline(blob, duration, name, fps = 30, title = name.replace(/\.[^.]+$/, "")) {
   window.dispatchEvent(new CustomEvent("makeshort:clip-ready", {
-    detail: { blob, duration, name, fps },
+    detail: { blob, duration, name, fps, title },
   }));
 }
 
@@ -135,7 +135,13 @@ form.addEventListener("submit", async (event) => {
       throw new Error(result.error || "클립을 만들지 못했어요. 잠시 후 다시 시도해 주세요.");
     }
     const fps = Number(response.headers.get("X-Makeshort-FPS")) || 30;
-    openTimeline(await response.blob(), end - start, "YouTube 클립", fps);
+    let youtubeTitle = "";
+    try {
+      youtubeTitle = decodeURIComponent(response.headers.get("X-Makeshort-Title") || "");
+    } catch {
+      youtubeTitle = "";
+    }
+    openTimeline(await response.blob(), end - start, "YouTube 클립", fps, youtubeTitle || "YouTube 클립");
   } catch (error) {
     showError(error instanceof Error ? error.message : "클립을 만들지 못했어요.");
   } finally {
