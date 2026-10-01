@@ -74,6 +74,28 @@ const downloadFile = (url, filename) => {
   anchor.remove();
 };
 
+const copyTextToClipboard = async (text) => {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall through to the browser's copy command when clipboard access is unavailable.
+  }
+
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.setAttribute("readonly", "");
+  textArea.style.position = "fixed";
+  textArea.style.opacity = "0";
+  document.body.append(textArea);
+  textArea.select();
+  const copied = document.execCommand("copy");
+  textArea.remove();
+  if (!copied) throw new Error("클립보드에 복사하지 못했습니다.");
+};
+
 export const TimelineEditor = () => {
   const [clip, setClip] = useState(null);
   const [clipUrl, setClipUrl] = useState("");
@@ -86,6 +108,7 @@ export const TimelineEditor = () => {
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState("");
   const [renderedUrl, setRenderedUrl] = useState("");
+  const [copiedCaptionJson, setCopiedCaptionJson] = useState("");
   const playerRef = useRef(null);
   const playerWrapRef = useRef(null);
   const timelineContentRef = useRef(null);
@@ -94,6 +117,11 @@ export const TimelineEditor = () => {
   const durationInFrames = Math.max(1, Math.round(duration * frameRate));
   const outputFilename = filenameForTitle(videoTitle);
   const selectedCaption = captions.find((caption) => caption.id === selectedId) ?? null;
+  const captionJson = useMemo(() => JSON.stringify({
+    captions: captions.map(({ id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration }) => ({
+      id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration,
+    })),
+  }, null, 2), [captions]);
   const timelineWidth = Math.max(720, duration * 28);
   const rulerTicks = useMemo(() => {
     const ticks = [];
@@ -222,6 +250,15 @@ export const TimelineEditor = () => {
     } else {
       const end = clamp(parsed, selectedCaption.start + 0.1, duration);
       updateCaption({ end });
+    }
+  };
+
+  const copyCaptionSettings = async () => {
+    try {
+      await copyTextToClipboard(captionJson);
+      setCopiedCaptionJson(captionJson);
+    } catch {
+      setError("자막 JSON을 복사하지 못했습니다. 브라우저의 클립보드 권한을 확인해 주세요.");
     }
   };
 
@@ -408,7 +445,15 @@ export const TimelineEditor = () => {
         </section>
 
         <aside className="caption-panel" aria-label="텍스트 레이어 설정">
-          <div className="caption-panel-heading"><div><span className="section-index">TEXT LAYERS</span><h3>텍스트 레이어</h3></div><button type="button" className="small-add-button" onClick={addCaption}>＋ 추가</button></div>
+          <div className="caption-panel-heading">
+            <div><span className="section-index">TEXT LAYERS</span><h3>텍스트 레이어</h3></div>
+            <div className="caption-panel-actions">
+              <button type="button" className="quiet-button caption-json-button" onClick={copyCaptionSettings} disabled={captions.length === 0} title="텍스트, 시간, 스타일을 captions JSON으로 복사">
+                {copiedCaptionJson === captionJson ? "복사 완료" : "JSON 복사"}
+              </button>
+              <button type="button" className="small-add-button" onClick={addCaption}>＋ 추가</button>
+            </div>
+          </div>
           {captions.length === 0 ? (
             <button type="button" className="empty-layer" onClick={addCaption}><span>＋</span><strong>첫 텍스트를 추가하세요</strong><small>시작·종료 시간을 정하고 스타일을 편집할 수 있어요.</small></button>
           ) : (

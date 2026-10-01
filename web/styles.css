@@ -140,6 +140,9 @@ input::placeholder { color: #b4b5ae; }
 .caption-panel { padding: 15px; background: #fff; }
 .caption-panel-heading, .timeline-heading, .inspector-label-row, .inspector-section-title { display: flex; align-items: center; justify-content: space-between; }
 .caption-panel-heading { margin-bottom: 11px; }
+.caption-panel-actions { display: flex; align-items: center; gap: 6px; }
+.caption-json-button { height: 29px; padding: 0 9px; font-size: 9px; }
+.caption-json-button:disabled { color: #b5b6ae; background: #f7f7f4; cursor: not-allowed; }
 .caption-panel-heading h3, .timeline-heading h3 { margin: 4px 0 0; font-size: 14px; letter-spacing: -.35px; }
 .small-add-button { height: 29px; padding: 0 9px; font-size: 9px; }
 .empty-layer { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; min-height: 120px; gap: 7px; border: 1px dashed #ddddcf; border-radius: 9px; color: #6f7166; background: #fbfbf8; }

@@ -43,7 +43,6 @@ python3 app.py
     {
       "text": "The Feels",
       "start": 0,
-      "end": 8,
       "position": "bottom-center",
       "positionX": 50,
       "positionY": 88,
@@ -59,7 +58,7 @@ python3 app.py
 }
 ```
 
-`id`를 생략하면 자막마다 자동으로 지정됩니다. 자막 스타일 기본값은 `font=noto`, `fontSize=72`, `color=#ffffff`, `position=bottom-center`, `boxWidth=84`, `boxHeight=10`, `animation=fade`, `decoration=shadow`입니다. 허용 폰트는 `noto`, `black-han`, `serif`, `system`; 애니메이션은 `none`, `fade`, `pop`, `typewriter`; 효과는 `none`, `shadow`, `outline`, `box`입니다. 위치는 `top-left`, `top-center`, `top-right`, `middle-left`, `middle-center`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right` 중에서 선택합니다. `positionX`와 `positionY`는 화면의 0~100% 좌표입니다.
+`id`를 생략하면 자막마다 자동으로 지정됩니다. 자막의 `start`와 `end`는 잘라낸 클립의 시작부터 센 초 단위 시간이며, `end`를 생략하면 해당 자막은 클립의 마지막 프레임까지 표시됩니다. 자막 스타일 기본값은 `font=noto`, `fontSize=72`, `color=#ffffff`, `position=bottom-center`, `boxWidth=84`, `boxHeight=10`, `animation=fade`, `decoration=shadow`입니다. 허용 폰트는 `noto`, `black-han`, `serif`, `system`; 애니메이션은 `none`, `fade`, `pop`, `typewriter`; 효과는 `none`, `shadow`, `outline`, `box`입니다. 위치는 `top-left`, `top-center`, `top-right`, `middle-left`, `middle-center`, `middle-right`, `bottom-left`, `bottom-center`, `bottom-right` 중에서 선택합니다. `positionX`와 `positionY`는 화면의 0~100% 좌표입니다.
 
 요청 JSON을 `request.json`으로 저장한 뒤 다음처럼 MP4를 받습니다. 응답 파일명에는 `title` 또는 YouTube 제목이 사용됩니다.
 

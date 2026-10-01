@@ -237,6 +237,7 @@ def normalize_api_captions(value: object) -> list[dict[str, object]]:
         if not isinstance(value_item, dict):
             raise RequestError("자막 설정은 JSON 객체여야 합니다.")
         caption = {**defaults, **value_item}
+        caption["_endAtClipEnd"] = "end" not in value_item
         caption_id = caption.get("id") or f"caption_{index}"
         if not isinstance(caption_id, str) or caption_id in used_ids:
             raise RequestError("자막 ID는 중복되지 않는 문자열이어야 합니다.")
@@ -487,10 +488,17 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                 raise RequestError("title은 500자 이내의 문자열이어야 합니다.")
             captions = normalize_api_captions(request.get("captions", []))
             provisional_duration = max(1, round(float(end - start) * DEFAULT_FPS))
+            provisional_captions = [
+                {
+                    **caption,
+                    "end": provisional_duration / DEFAULT_FPS,
+                } if caption["_endAtClipEnd"] else caption
+                for caption in captions
+            ]
             validate_render_props({
                 "fps": DEFAULT_FPS,
                 "durationInFrames": provisional_duration,
-                "captions": captions,
+                "captions": provisional_captions,
             })
         except (json.JSONDecodeError, UnicodeDecodeError):
             send_json(self, 400, {"error": "요청 본문이 올바른 JSON이 아닙니다."})
@@ -511,10 +519,18 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                 clip_path = temp_root / "clip.mp4"
                 fps = create_portrait_clip(source, clip_path, start, end, mode)
                 frame_count = probe_video_frame_count(clip_path)
+                clip_duration = frame_count / fps
+                render_captions = [
+                    {
+                        **caption,
+                        "end": clip_duration,
+                    } if caption["_endAtClipEnd"] else caption
+                    for caption in captions
+                ]
                 props = validate_render_props({
                     "fps": fps,
                     "durationInFrames": frame_count,
-                    "captions": captions,
+                    "captions": render_captions,
                 })
                 title = requested_title.strip() or youtube_title
                 output_path = temp_root / "captioned.mp4"
