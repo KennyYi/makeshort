@@ -1,6 +1,8 @@
 import React from "react";
 import {
   AbsoluteFill,
+  Audio,
+  Img,
   OffthreadVideo,
   Sequence,
   interpolate,
@@ -99,11 +101,30 @@ const Caption = ({ caption, selectedId, onPointerDown, onPointerMove, onPointerU
   );
 };
 
-export const CaptionVideo = ({ src, captions = [], selectedId = null, onCaptionPointerDown, onCaptionPointerMove, onCaptionPointerUp }) => {
+export const CaptionVideo = ({ src, captions = [], images = [], voiceovers = [], selectedId = null, onCaptionPointerDown, onCaptionPointerMove, onCaptionPointerUp }) => {
   const { fps, durationInFrames } = useVideoConfig();
   return (
     <AbsoluteFill style={{ backgroundColor: "#000", overflow: "hidden" }}>
-      <OffthreadVideo src={src} style={{ width: "100%", height: "100%", objectFit: "fill" }} />
+      {src ? <OffthreadVideo src={src} style={{ width: "100%", height: "100%", objectFit: "fill" }} /> : null}
+      {images.map((image) => {
+        const from = Math.max(0, Math.round(image.start * fps));
+        const end = Math.min(durationInFrames, Math.round(image.end * fps));
+        const duration = Math.max(1, end - from);
+        return (
+          <Sequence key={image.id} from={from} durationInFrames={duration}>
+            <Img src={image.src} style={{ width: "100%", height: "100%", objectFit: image.fit === "cover" ? "cover" : "contain" }} />
+          </Sequence>
+        );
+      })}
+      {voiceovers.map((voiceover) => {
+        const from = Math.max(0, Math.round(voiceover.start * fps));
+        const duration = Math.max(1, Math.ceil(voiceover.duration * fps));
+        return (
+          <Sequence key={voiceover.id} from={from} durationInFrames={duration}>
+            <Audio src={voiceover.src} volume={voiceover.volume ?? 1} />
+          </Sequence>
+        );
+      })}
       {captions.map((caption) => {
         const from = Math.max(0, Math.round(caption.start * fps));
         const end = Math.min(durationInFrames, Math.round(caption.end * fps));

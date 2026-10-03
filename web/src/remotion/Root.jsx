@@ -14,6 +14,6 @@ export const RemotionRoot = () => (
       fps: props.fps ?? 30,
       durationInFrames: props.durationInFrames ?? 90,
     })}
-    defaultProps={{ src: "", captions: [], selectedId: null, fps: 30, durationInFrames: 90 }}
+    defaultProps={{ src: "", captions: [], images: [], voiceovers: [], selectedId: null, fps: 30, durationInFrames: 90 }}
   />
 );

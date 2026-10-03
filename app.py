@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import base64
@@ -21,6 +22,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 import yt_dlp
+from social import SocialError, SocialManager
+from voice import VOICE_GENDERS, VOICE_TONES, VoiceError, VoiceManager
 
 
 ROOT = Path(__file__).resolve().parent
@@ -33,6 +36,11 @@ CAPTION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 MEDIA_FILES: dict[str, Path] = {}
 MEDIA_FILES_LOCK = threading.Lock()
+PROJECT_MEDIA_KEYS: set[str] = set()
+PROJECT_MEDIA_ROOT = Path(tempfile.mkdtemp(prefix="makeshort-project-media-"))
+atexit.register(shutil.rmtree, PROJECT_MEDIA_ROOT, ignore_errors=True)
+SOCIAL = SocialManager()
+VOICE = VoiceManager()
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
 DEFAULT_FPS = 30
@@ -141,10 +149,10 @@ def probe_video_fps(video_path: Path) -> tuple[str, float]:
     return str(DEFAULT_FPS), float(DEFAULT_FPS)
 
 
-def download_youtube_source(video_id: str, temp_root: Path) -> tuple[Path, str]:
+def download_youtube_source(video_id: str, temp_root: Path, include_audio: bool = True) -> tuple[Path, str]:
     source_template = str(temp_root / "source.%(ext)s")
     options = {
-        "format": "bv*+ba/b",
+        "format": "bv*+ba/b" if include_audio else "bv/b",
         "outtmpl": source_template,
         "merge_output_format": "mkv",
         "noplaylist": True,
@@ -171,7 +179,14 @@ def download_youtube_source(video_id: str, temp_root: Path) -> tuple[Path, str]:
     return candidates[0], title
 
 
-def create_portrait_clip(source: Path, output: Path, start: Decimal, end: Decimal, mode: str) -> float:
+def create_portrait_clip(
+    source: Path,
+    output: Path,
+    start: Decimal,
+    end: Decimal,
+    mode: str,
+    include_audio: bool = True,
+) -> float:
     fps_expression, fps_value = probe_video_fps(source)
     video_filter = make_filter(mode, fps_expression)
     ffmpeg = shutil.which("ffmpeg")
@@ -180,11 +195,19 @@ def create_portrait_clip(source: Path, output: Path, start: Decimal, end: Decima
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-ss", str(start), "-i", str(source), "-t", str(end - start),
-        "-map", "0:v:0", "-map", "0:a?", "-vf", video_filter,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-        "-pix_fmt", "yuv420p", str(output),
+        "-map", "0:v:0",
     ]
+    if include_audio:
+        command.extend(["-map", "0:a?"])
+    else:
+        command.append("-an")
+    command.extend([
+        "-vf", video_filter,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+    ])
+    if include_audio:
+        command.extend(["-c:a", "aac", "-b:a", "192k"])
+    command.extend(["-movflags", "+faststart", "-pix_fmt", "yuv420p", str(output)])
     logger.info("Creating %s clip (%s to %s)", mode, start, end)
     subprocess.run(command, check=True, capture_output=True, timeout=3600)
     if not output.is_file() or output.stat().st_size == 0:
@@ -213,6 +236,23 @@ def probe_video_frame_count(video_path: Path) -> int:
     if frame_count < 1:
         raise RuntimeError("ffprobe could not determine the clip frame count")
     return frame_count
+
+
+def probe_audio_duration(audio_path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(audio_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    try:
+        duration = float(json.loads(result.stdout).get("format", {}).get("duration", 0))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        duration = 0
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("ffprobe could not determine the generated audio duration")
+    return duration
 
 
 def normalize_api_captions(value: object) -> list[dict[str, object]]:
@@ -255,7 +295,7 @@ def safe_video_filename(title: str) -> str:
 
 
 def render_video_with_remotion(
-    source_path: Path,
+    source_path: Path | None,
     output_path: Path,
     props_path: Path,
     props: dict[str, object],
@@ -265,20 +305,39 @@ def render_video_with_remotion(
     if not remotion_cli.exists():
         raise FileNotFoundError("Remotion CLI was not found")
 
-    media_key = uuid.uuid4().hex
-    props["src"] = f"http://{HOST}:{server_port}/api/media/{media_key}"
-    props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
-    with MEDIA_FILES_LOCK:
-        MEDIA_FILES[media_key] = source_path
-
-    command = [
-        str(remotion_cli), "render", str(ROOT / "web" / "src" / "remotion" / "index.jsx"),
-        "CaptionedClip", str(output_path), "--props", str(props_path),
-        "--duration", str(props["durationInFrames"]), "--codec", "h264", "--crf", "18",
-        "--concurrency", "2",
-    ]
+    render_media_keys: list[str] = []
     try:
-        logger.info("Rendering Remotion composition for %s", media_key)
+        if source_path is not None:
+            media_key = uuid.uuid4().hex
+            props["src"] = f"http://{HOST}:{server_port}/api/media/{media_key}"
+            with MEDIA_FILES_LOCK:
+                MEDIA_FILES[media_key] = source_path
+            render_media_keys.append(media_key)
+        else:
+            props.pop("src", None)
+        for image in props.get("images", []):
+            asset_key = image["assetKey"]
+            with MEDIA_FILES_LOCK:
+                image_path = MEDIA_FILES.get(asset_key)
+            if image_path is None or not image_path.is_file():
+                raise RequestError("이미지 파일이 만료되었습니다. 이미지를 다시 추가해 주세요.")
+            image["src"] = f"http://{HOST}:{server_port}/api/media/{asset_key}"
+        for voiceover in props.get("voiceovers", []):
+            asset_key = voiceover["assetKey"]
+            with MEDIA_FILES_LOCK:
+                audio_path = MEDIA_FILES.get(asset_key)
+            if audio_path is None or not audio_path.is_file():
+                raise RequestError("생성된 음성이 만료되었습니다. 음성을 다시 만들어 주세요.")
+            voiceover["src"] = f"http://{HOST}:{server_port}/api/media/{asset_key}"
+        props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
+
+        command = [
+            str(remotion_cli), "render", str(ROOT / "web" / "src" / "remotion" / "index.jsx"),
+            "CaptionedClip", str(output_path), "--props", str(props_path),
+            "--duration", str(props["durationInFrames"]), "--codec", "h264", "--crf", "18",
+            "--concurrency", "2",
+        ]
+        logger.info("Rendering Remotion composition with %s", "video source" if source_path is not None else "overlay layers only")
         result = subprocess.run(
             command, cwd=ROOT, capture_output=True, text=True, timeout=7200,
         )
@@ -289,10 +348,11 @@ def render_video_with_remotion(
             raise RuntimeError("Remotion completed without an output file")
     finally:
         with MEDIA_FILES_LOCK:
-            MEDIA_FILES.pop(media_key, None)
+            for media_key in render_media_keys:
+                MEDIA_FILES.pop(media_key, None)
 
 
-def send_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, str]) -> None:
+def send_json(handler: BaseHTTPRequestHandler, status: int, payload: object) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -340,7 +400,8 @@ class MakeShortHandler(BaseHTTPRequestHandler):
 
         length = end - start + 1
         self.send_response(status)
-        self.send_header("Content-Type", "video/mp4")
+        content_type, _ = mimetypes.guess_type(media_path.name)
+        self.send_header("Content-Type", content_type or "application/octet-stream")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
         if status == 206:
@@ -374,6 +435,42 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             return
 
         path = "/" if self.path == "/" else self.path.split("?", 1)[0]
+        if path == "/api/voice/status":
+            if not self._social_origin_is_local():
+                send_json(self, 403, {"error": "로컬 MakeShort 화면에서만 음성 설정을 확인할 수 있습니다."})
+                return
+            send_json(self, 200, VOICE.status())
+            return
+        if path == "/api/social/status":
+            try:
+                send_json(self, 200, SOCIAL.status())
+            except SocialError as exc:
+                send_json(self, 500, {"error": str(exc)})
+            return
+        match = re.fullmatch(r"/oauth/(youtube|instagram|tiktok)/start", path)
+        if match:
+            try:
+                location = SOCIAL.oauth_start(match.group(1))
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+            except SocialError as exc:
+                self._send_oauth_popup(match.group(1), str(exc), failed=True)
+            return
+        match = re.fullmatch(r"/oauth/(youtube|instagram|tiktok)/callback", path)
+        if match:
+            provider = match.group(1)
+            try:
+                query = parse_qs(urlsplit(self.path).query)
+                message = SOCIAL.oauth_callback(provider, query)
+                self._send_oauth_popup(provider, message, failed=False)
+            except SocialError as exc:
+                self._send_oauth_popup(provider, str(exc), failed=True)
+            except Exception:
+                logger.exception("Social OAuth callback failed for %s", provider)
+                self._send_oauth_popup(provider, "계정 연결 중 오류가 발생했습니다. 서버 로그를 확인해 주세요.", failed=True)
+            return
         relative_path = "index.html" if path == "/" else path.lstrip("/")
         file_path = (WEB_ROOT / relative_path).resolve()
         if WEB_ROOT.resolve() not in file_path.parents or not file_path.is_file():
@@ -395,6 +492,43 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_POST(self) -> None:
+        route = self.path.split("?", 1)[0]
+        if route in {"/api/media/upload", "/api/media/delete"} and not self._social_origin_is_local():
+            send_json(self, 403, {"error": "로컬 MakeShort 화면에서만 미디어 작업을 요청할 수 있습니다."})
+            return
+        if route == "/api/media/upload":
+            self._upload_project_image()
+            return
+        if route == "/api/media/delete":
+            self._delete_project_image()
+            return
+        if route.startswith("/api/voice/") and not self._social_origin_is_local():
+            send_json(self, 403, {"error": "로컬 MakeShort 화면에서만 음성 기능을 사용할 수 있습니다."})
+            return
+        if route == "/api/voice/generate":
+            self._voice_generate()
+            return
+        if route.startswith("/api/social/") and not self._social_origin_is_local():
+            send_json(self, 403, {"error": "로컬 MakeShort 화면에서만 계정 작업을 요청할 수 있습니다."})
+            return
+        if route == "/api/social/config":
+            self._social_configure()
+            return
+        if route == "/api/social/disconnect":
+            self._social_disconnect()
+            return
+        if route == "/api/social/select-account":
+            self._social_select_account()
+            return
+        if route == "/api/social/tiktok/creator-info":
+            try:
+                send_json(self, 200, SOCIAL.tiktok_creator_info())
+            except SocialError as exc:
+                send_json(self, 400, {"error": str(exc)})
+            return
+        if route == "/api/social/publish":
+            self._social_publish()
+            return
         if self.path == "/api/create":
             self.create_composite()
             return
@@ -425,6 +559,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             mode = request.get("mode")
             if not isinstance(mode, str) or mode not in {"fill", "fit"}:
                 raise RequestError("화면 비율 옵션을 선택해 주세요.")
+            include_audio = request.get("include_audio", True)
+            if not isinstance(include_audio, bool):
+                raise RequestError("include_audio는 true 또는 false여야 합니다.")
         except (json.JSONDecodeError, UnicodeDecodeError):
             send_json(self, 400, {"error": "요청 내용을 확인해 주세요."})
             return
@@ -435,9 +572,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         try:
             with tempfile.TemporaryDirectory(prefix="makeshort-") as temp_dir:
                 temp_root = Path(temp_dir)
-                source, video_title = download_youtube_source(video_id, temp_root)
+                source, video_title = download_youtube_source(video_id, temp_root, include_audio)
                 output = temp_root / "makeshort_clip.mp4"
-                fps_value = create_portrait_clip(source, output, start, end, mode)
+                fps_value = create_portrait_clip(source, output, start, end, mode, include_audio)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
@@ -458,6 +595,162 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                     send_json(self, 500, {"error": "클립을 만드는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
                 except (BrokenPipeError, ConnectionResetError):
                     pass
+
+    def _social_origin_is_local(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        return origin.rstrip("/") in {"http://127.0.0.1:8000", "http://localhost:8000"}
+
+    def _read_social_json(self, max_bytes: int = 64_000) -> dict[str, object] | None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            send_json(self, 400, {"error": "요청 크기를 확인해 주세요."})
+            return None
+        if length <= 0 or length > max_bytes:
+            send_json(self, 413, {"error": f"요청은 {max_bytes // 1000}KB 이하여야 합니다."})
+            return None
+        try:
+            request = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            send_json(self, 400, {"error": "올바른 JSON 요청이 아닙니다."})
+            return None
+        if not isinstance(request, dict):
+            send_json(self, 400, {"error": "요청 본문은 JSON 객체여야 합니다."})
+            return None
+        return request
+
+    def _social_configure(self) -> None:
+        request = self._read_social_json()
+        if request is None:
+            return
+        try:
+            result = SOCIAL.configure(request.get("provider"), request.get("client_id"), request.get("client_secret"))
+            send_json(self, 200, result)
+        except SocialError as exc:
+            send_json(self, 400, {"error": str(exc)})
+
+    def _voice_generate(self) -> None:
+        request = self._read_social_json(max_bytes=100_000)
+        if request is None:
+            return
+        text = request.get("text")
+        speed = request.get("speed", 1)
+        gender = request.get("gender", "female")
+        tone = request.get("tone", "calm")
+        if not isinstance(text, str) or not text.strip() or len(text) > 20_000:
+            send_json(self, 400, {"error": "읽을 문장은 1~20,000자여야 합니다."})
+            return
+        if not isinstance(gender, str) or gender not in VOICE_GENDERS:
+            send_json(self, 400, {"error": "남성 또는 여성 음성을 선택해 주세요."})
+            return
+        if not isinstance(tone, str) or tone not in VOICE_TONES:
+            send_json(self, 400, {"error": "음성 어투 프리셋을 선택해 주세요."})
+            return
+        if not isinstance(speed, (int, float)) or isinstance(speed, bool) or not math.isfinite(speed) or not 0.7 <= speed <= 1.3:
+            send_json(self, 400, {"error": "읽기 속도는 0.7~1.3 범위에서 선택해 주세요."})
+            return
+        if not VOICE.status()["available"]:
+            send_json(self, 503, {"error": VOICE.unavailable_message()})
+            return
+
+        media_key = uuid.uuid4().hex
+        audio_path = PROJECT_MEDIA_ROOT / f"{media_key}.wav"
+        try:
+            VOICE.generate(text.strip(), gender, tone, float(speed), audio_path)
+            duration = probe_audio_duration(audio_path)
+            with MEDIA_FILES_LOCK:
+                MEDIA_FILES[media_key] = audio_path
+                PROJECT_MEDIA_KEYS.add(media_key)
+        except VoiceError as exc:
+            audio_path.unlink(missing_ok=True)
+            send_json(self, 400, {"error": str(exc)})
+            return
+        except Exception:
+            audio_path.unlink(missing_ok=True)
+            logger.exception("Could not prepare generated voice audio")
+            send_json(self, 500, {"error": "생성된 음성을 편집기에 추가하지 못했습니다."})
+            return
+        send_json(self, 201, {"assetKey": media_key, "duration": duration, "voice": VOICE.describe(gender, tone)})
+
+    def _social_disconnect(self) -> None:
+        request = self._read_social_json()
+        if request is None:
+            return
+        try:
+            send_json(self, 200, SOCIAL.disconnect(request.get("provider")))
+        except SocialError as exc:
+            send_json(self, 400, {"error": str(exc)})
+
+    def _social_select_account(self) -> None:
+        request = self._read_social_json()
+        if request is None:
+            return
+        try:
+            send_json(self, 200, SOCIAL.select_account(request.get("provider"), request.get("account_id")))
+        except SocialError as exc:
+            send_json(self, 400, {"error": str(exc)})
+
+    def _social_publish(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            send_json(self, 400, {"error": "영상 파일 크기를 확인해 주세요."})
+            return
+        if length <= 0 or length > 1_000_000_000:
+            send_json(self, 413, {"error": "영상 파일은 비어 있거나 1GB를 초과할 수 없습니다."})
+            return
+        encoded = self.headers.get("X-Makeshort-Publish", "")
+        if not encoded or len(encoded) > 64_000:
+            send_json(self, 400, {"error": "게시물 설정이 없거나 너무 큽니다."})
+            return
+        try:
+            padded = encoded + "=" * (-len(encoded) % 4)
+            metadata = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+            if not isinstance(metadata, dict):
+                raise ValueError
+        except (ValueError, UnicodeEncodeError, json.JSONDecodeError):
+            send_json(self, 400, {"error": "게시물 설정 JSON을 확인해 주세요."})
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="makeshort-publish-") as temp_dir:
+                video_path = Path(temp_dir) / "makeshort_captioned.mp4"
+                remaining = length
+                with video_path.open("wb") as video_file:
+                    while remaining:
+                        chunk = self.rfile.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise RequestError("영상 업로드가 중간에 끊겼습니다.")
+                        video_file.write(chunk)
+                        remaining -= len(chunk)
+                send_json(self, 200, SOCIAL.publish(video_path, metadata))
+        except (SocialError, RequestError) as exc:
+            send_json(self, 400, {"error": str(exc)})
+        except Exception:
+            logger.exception("Social distribution request failed")
+            if not self.wfile.closed:
+                send_json(self, 500, {"error": "배포 중 오류가 발생했습니다. 앱 로그를 확인해 주세요."})
+
+    def _send_oauth_popup(self, provider: str, message: str, failed: bool) -> None:
+        payload = json.dumps(
+            {"type": "makeshort-social-oauth", "provider": provider, "ok": not failed, "message": message},
+            ensure_ascii=False,
+        ).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+        text = "계정 연결에 실패했습니다. MakeShort 화면에서 오류를 확인하세요." if failed else "연결되었습니다. 이 창을 닫고 MakeShort로 돌아가세요."
+        body = (
+            "<!doctype html><html lang=\"ko\"><meta charset=\"utf-8\"><title>MakeShort 계정 연결</title>"
+            "<body><p>" + text + "</p><script>const result=" + payload + ";"
+            "if(window.opener){window.opener.postMessage(result,'*');}"
+            "setTimeout(()=>window.close(),250);</script></body></html>"
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def create_composite(self) -> None:
         try:
@@ -483,6 +776,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             mode = request.get("mode", "fill")
             if not isinstance(mode, str) or mode not in {"fill", "fit"}:
                 raise RequestError("mode는 fill 또는 fit이어야 합니다.")
+            include_audio = request.get("include_audio", True)
+            if not isinstance(include_audio, bool):
+                raise RequestError("include_audio는 true 또는 false여야 합니다.")
             requested_title = request.get("title", "")
             if not isinstance(requested_title, str) or len(requested_title) > 500:
                 raise RequestError("title은 500자 이내의 문자열이어야 합니다.")
@@ -515,9 +811,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         try:
             with tempfile.TemporaryDirectory(prefix="makeshort-api-") as temp_dir:
                 temp_root = Path(temp_dir)
-                source, youtube_title = download_youtube_source(video_id, temp_root)
+                source, youtube_title = download_youtube_source(video_id, temp_root, include_audio)
                 clip_path = temp_root / "clip.mp4"
-                fps = create_portrait_clip(source, clip_path, start, end, mode)
+                fps = create_portrait_clip(source, clip_path, start, end, mode, include_audio)
                 frame_count = probe_video_frame_count(clip_path)
                 clip_duration = frame_count / fps
                 render_captions = [
@@ -579,8 +875,8 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         except ValueError:
             send_json(self, 400, {"error": "업로드한 영상 크기를 확인해 주세요."})
             return
-        if length <= 0 or length > 1_000_000_000:
-            send_json(self, 413, {"error": "영상 파일이 비어 있거나 1GB를 초과합니다."})
+        if length < 0 or length > 1_000_000_000:
+            send_json(self, 413, {"error": "영상 파일이 1GB를 초과합니다."})
             return
 
         encoded_props = self.headers.get("X-Makeshort-Props", "")
@@ -608,17 +904,18 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                 input_path = temp_root / "input.mp4"
                 output_path = temp_root / "captioned.mp4"
                 props_path = temp_root / "props.json"
-                remaining = length
-                with input_path.open("wb") as video_file:
-                    while remaining:
-                        chunk = self.rfile.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            raise RequestError("영상 업로드가 중간에 끊겼습니다.")
-                        video_file.write(chunk)
-                        remaining -= len(chunk)
+                if length:
+                    remaining = length
+                    with input_path.open("wb") as video_file:
+                        while remaining:
+                            chunk = self.rfile.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                raise RequestError("영상 업로드가 중간에 끊겼습니다.")
+                            video_file.write(chunk)
+                            remaining -= len(chunk)
 
                 render_video_with_remotion(
-                    input_path,
+                    input_path if length else None,
                     output_path,
                     props_path,
                     props,
@@ -640,10 +937,74 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         except Exception:
             logger.exception("Remotion composition failed")
             if not response_started:
-                send_json(self, 500, {"error": "텍스트를 합성하는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
+                send_json(self, 500, {"error": "미디어를 합성하는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
+
+    def _upload_project_image(self) -> None:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(content_type)
+        if not extension:
+            send_json(self, 415, {"error": "JPG, PNG 또는 WebP 이미지 파일을 선택해 주세요."})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            send_json(self, 400, {"error": "이미지 크기를 확인해 주세요."})
+            return
+        if length <= 0 or length > 25_000_000:
+            send_json(self, 413, {"error": "이미지는 파일당 25MB 이하로 선택해 주세요."})
+            return
+        data = self.rfile.read(length)
+        if len(data) != length:
+            send_json(self, 400, {"error": "이미지 업로드가 중간에 끊겼습니다."})
+            return
+        signatures = {
+            ".jpg": data.startswith(b"\xff\xd8\xff"),
+            ".png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+            ".webp": len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+        }
+        if not signatures[extension]:
+            send_json(self, 415, {"error": "파일 형식이 이미지 내용과 일치하지 않습니다."})
+            return
+        media_key = uuid.uuid4().hex
+        media_path = PROJECT_MEDIA_ROOT / f"{media_key}{extension}"
+        try:
+            media_path.write_bytes(data)
+        except OSError:
+            logger.exception("Could not store uploaded project image")
+            send_json(self, 500, {"error": "이미지를 임시 저장하지 못했습니다."})
+            return
+        with MEDIA_FILES_LOCK:
+            MEDIA_FILES[media_key] = media_path
+            PROJECT_MEDIA_KEYS.add(media_key)
+        send_json(self, 201, {"assetKey": media_key})
+
+    def _delete_project_image(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 2048:
+                raise ValueError
+            request = json.loads(self.rfile.read(length))
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            send_json(self, 400, {"error": "프로젝트 미디어 삭제 요청을 확인해 주세요."})
+            return
+        asset_key = request.get("assetKey") if isinstance(request, dict) else None
+        if not isinstance(asset_key, str) or not re.fullmatch(r"[a-f0-9]{32}", asset_key):
+            send_json(self, 400, {"error": "프로젝트 미디어 ID를 확인해 주세요."})
+            return
+        with MEDIA_FILES_LOCK:
+            if asset_key not in PROJECT_MEDIA_KEYS:
+                send_json(self, 404, {"error": "프로젝트 미디어를 찾을 수 없습니다."})
+                return
+            PROJECT_MEDIA_KEYS.remove(asset_key)
+            media_path = MEDIA_FILES.pop(asset_key, None)
+        if media_path:
+            media_path.unlink(missing_ok=True)
+        send_json(self, 200, {"deleted": True})
 
     def log_message(self, format: str, *args: object) -> None:
-        logger.info("%s - %s", self.address_string(), format % args)
+        message = format % args
+        message = re.sub(r"(/oauth/(?:youtube|instagram|tiktok)/callback)\?[^ ]+", r"\1?<redacted>", message)
+        logger.info("%s - %s", self.address_string(), message)
 
 
 def validate_render_props(props: object) -> dict[str, object]:
@@ -661,6 +1022,12 @@ def validate_render_props(props: object) -> dict[str, object]:
     captions = props.get("captions", [])
     if not isinstance(captions, list) or len(captions) > 120:
         raise RequestError("텍스트 레이어는 최대 120개까지 사용할 수 있습니다.")
+    images = props.get("images", [])
+    if not isinstance(images, list) or len(images) > 50:
+        raise RequestError("이미지 레이어는 최대 50개까지 사용할 수 있습니다.")
+    voiceovers = props.get("voiceovers", [])
+    if not isinstance(voiceovers, list) or len(voiceovers) > 50:
+        raise RequestError("AI 음성 레이어는 최대 50개까지 사용할 수 있습니다.")
 
     position_layout = {
         "top-left": (5, 5, 0, 0), "top-center": (50, 5, 0.5, 0), "top-right": (95, 5, 1, 0),
@@ -671,6 +1038,8 @@ def validate_render_props(props: object) -> dict[str, object]:
     animations = {"none", "fade", "pop", "typewriter"}
     decorations = {"none", "shadow", "outline", "box"}
     checked: list[dict[str, object]] = []
+    checked_images: list[dict[str, object]] = []
+    checked_voiceovers: list[dict[str, object]] = []
     duration_seconds = duration_frames / frame_rate
     for caption in captions:
         if not isinstance(caption, dict):
@@ -732,7 +1101,74 @@ def validate_render_props(props: object) -> dict[str, object]:
             "animation": animation,
             "decoration": decoration,
         })
-    return {"fps": frame_rate, "durationInFrames": duration_frames, "captions": checked}
+    for image in images:
+        if not isinstance(image, dict):
+            raise RequestError("이미지 레이어 설정을 확인해 주세요.")
+        image_id = image.get("id")
+        asset_key = image.get("assetKey")
+        if not isinstance(image_id, str) or not CAPTION_ID.fullmatch(image_id):
+            raise RequestError("이미지 레이어 ID를 확인해 주세요.")
+        if not isinstance(asset_key, str) or not re.fullmatch(r"[a-f0-9]{32}", asset_key):
+            raise RequestError("이미지 파일을 다시 추가해 주세요.")
+        try:
+            start = float(image.get("start"))
+            end = float(image.get("end"))
+        except (TypeError, ValueError):
+            raise RequestError("이미지의 노출 시간을 확인해 주세요.") from None
+        fit = image.get("fit", "contain")
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start or end > duration_seconds + 0.05:
+            raise RequestError("이미지 시작·종료 시간은 클립 범위 안에 있어야 합니다.")
+        if not isinstance(fit, str) or fit not in {"contain", "cover"}:
+            raise RequestError("이미지 맞춤 방식을 확인해 주세요.")
+        with MEDIA_FILES_LOCK:
+            asset_exists = asset_key in PROJECT_MEDIA_KEYS and asset_key in MEDIA_FILES
+        if not asset_exists:
+            raise RequestError("이미지 파일이 만료되었습니다. 이미지를 다시 추가해 주세요.")
+        checked_images.append({"id": image_id, "assetKey": asset_key, "start": start, "end": end, "fit": fit})
+    for voiceover in voiceovers:
+        if not isinstance(voiceover, dict):
+            raise RequestError("AI 음성 레이어 설정을 확인해 주세요.")
+        voiceover_id = voiceover.get("id")
+        asset_key = voiceover.get("assetKey")
+        if not isinstance(voiceover_id, str) or not CAPTION_ID.fullmatch(voiceover_id):
+            raise RequestError("AI 음성 레이어 ID를 확인해 주세요.")
+        if not isinstance(asset_key, str) or not re.fullmatch(r"[a-f0-9]{32}", asset_key):
+            raise RequestError("생성된 음성을 다시 만들어 주세요.")
+        try:
+            start = float(voiceover.get("start"))
+            audio_duration = float(voiceover.get("duration"))
+            volume = float(voiceover.get("volume", 1))
+        except (TypeError, ValueError):
+            raise RequestError("AI 음성의 위치와 길이를 확인해 주세요.") from None
+        if (
+            not math.isfinite(start)
+            or not math.isfinite(audio_duration)
+            or not math.isfinite(volume)
+            or start < 0
+            or audio_duration <= 0
+            or start + audio_duration > duration_seconds + 0.05
+            or volume < 0
+            or volume > 1
+        ):
+            raise RequestError("AI 음성의 시간 또는 볼륨이 프로젝트 범위를 벗어났습니다.")
+        with MEDIA_FILES_LOCK:
+            asset_exists = asset_key in PROJECT_MEDIA_KEYS and asset_key in MEDIA_FILES
+        if not asset_exists:
+            raise RequestError("생성된 음성이 만료되었습니다. 음성을 다시 만들어 주세요.")
+        checked_voiceovers.append({
+            "id": voiceover_id,
+            "assetKey": asset_key,
+            "start": start,
+            "duration": audio_duration,
+            "volume": volume,
+        })
+    return {
+        "fps": frame_rate,
+        "durationInFrames": duration_frames,
+        "captions": checked,
+        "images": checked_images,
+        "voiceovers": checked_voiceovers,
+    }
 
 
 def main() -> None:

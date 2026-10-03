@@ -2,6 +2,7 @@ const form = document.querySelector("#clip-form");
 const urlInput = document.querySelector("#youtube-url");
 const startInput = document.querySelector("#start-time");
 const endInput = document.querySelector("#end-time");
+const includeAudioInput = document.querySelector("#include-audio");
 const createButton = document.querySelector("#create-button");
 const errorBox = document.querySelector("#form-error");
 const previewScreen = document.querySelector("#preview-screen");
@@ -127,6 +128,7 @@ form.addEventListener("submit", async (event) => {
         start: startInput.value.trim(),
         end: endInput.value.trim(),
         mode: selectedMode(),
+        include_audio: includeAudioInput.checked,
       }),
     });
 
