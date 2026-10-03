@@ -22,6 +22,10 @@ const FONT = {
   noto: '"Noto Sans KR", "Apple SD Gothic Neo", sans-serif',
   "black-han": '"Black Han Sans", "Apple SD Gothic Neo", sans-serif',
   serif: '"Noto Serif KR", "AppleMyungjo", serif',
+  "do-hyeon": '"Do Hyeon", "Apple SD Gothic Neo", sans-serif',
+  "gowun-dodum": '"Gowun Dodum", "Apple SD Gothic Neo", sans-serif',
+  "gowun-batang": '"Gowun Batang", "AppleMyungjo", serif',
+  "nanum-gothic": '"Nanum Gothic", "Apple SD Gothic Neo", sans-serif',
   system: '"Apple SD Gothic Neo", sans-serif',
 };
 

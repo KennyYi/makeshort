@@ -949,7 +949,7 @@ export const TimelineEditor = () => {
               </div>
 
               <div className="style-grid">
-                <label className="control-field font-select"><span>폰트</span><select value={selectedCaption.font} onChange={(event) => updateCaption({ font: event.target.value })}><option value="noto">Noto Sans KR</option><option value="black-han">Black Han Sans</option><option value="serif">Noto Serif KR</option><option value="system">시스템 고딕</option></select></label>
+                <label className="control-field font-select"><span>폰트</span><select value={selectedCaption.font} onChange={(event) => updateCaption({ font: event.target.value })}><option value="noto">Noto Sans KR</option><option value="black-han">Black Han Sans</option><option value="serif">Noto Serif KR</option><option value="do-hyeon">Do Hyeon · 도현체</option><option value="gowun-dodum">Gowun Dodum · 고운돋움</option><option value="gowun-batang">Gowun Batang · 고운바탕</option><option value="nanum-gothic">Nanum Gothic · 나눔고딕</option><option value="system">시스템 고딕</option></select></label>
                 <label className="control-field size-control"><span>크기</span><div><input type="range" min="36" max="144" step="2" value={selectedCaption.fontSize} onChange={(event) => updateCaption({ fontSize: Number(event.target.value) })} /><b>{selectedCaption.fontSize}</b></div></label>
               </div>
               <div className="box-size-controls">

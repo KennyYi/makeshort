@@ -1034,7 +1034,7 @@ def validate_render_props(props: object) -> dict[str, object]:
         "middle-left": (5, 50, 0, 0.5), "middle-center": (50, 50, 0.5, 0.5), "middle-right": (95, 50, 1, 0.5),
         "bottom-left": (5, 95, 0, 1), "bottom-center": (50, 95, 0.5, 1), "bottom-right": (95, 95, 1, 1),
     }
-    fonts = {"noto", "black-han", "serif", "system"}
+    fonts = {"noto", "black-han", "serif", "do-hyeon", "gowun-dodum", "gowun-batang", "nanum-gothic", "system"}
     animations = {"none", "fade", "pop", "typewriter"}
     decorations = {"none", "shadow", "outline", "box"}
     checked: list[dict[str, object]] = []
