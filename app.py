@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import yt_dlp
 from social import SocialError, SocialManager
-from voice import VOICE_GENDERS, VOICE_TONES, VoiceError, VoiceManager
+from voice import VOICE_GENDERS, VOICE_LANGUAGES, VOICE_TONES, VoiceError, VoiceManager
 
 
 ROOT = Path(__file__).resolve().parent
@@ -285,6 +285,71 @@ def normalize_api_captions(value: object) -> list[dict[str, object]]:
         caption["id"] = caption_id
         captions.append(caption)
     return captions
+
+
+def normalize_api_voiceovers(value: object) -> list[dict[str, object]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 50:
+        raise RequestError("AI 음성 레이어는 최대 50개까지 설정할 수 있습니다.")
+
+    voiceovers: list[dict[str, object]] = []
+    used_ids: set[str] = set()
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise RequestError("AI 음성 설정은 JSON 객체여야 합니다.")
+        text = item.get("text")
+        gender = item.get("gender", "female")
+        tone = item.get("tone", "calm")
+        language = item.get("language", "Korean")
+        speed = item.get("speed", 1)
+        volume = item.get("volume", 1)
+        voiceover_id = item.get("id") or f"voiceover_{index}"
+        start_value = item.get("start")
+        if isinstance(start_value, bool):
+            raise RequestError("AI 음성 시작 시간은 초 단위 숫자로 입력해 주세요.")
+        try:
+            start = float(start_value)
+        except (TypeError, ValueError):
+            raise RequestError("AI 음성 시작 시간은 초 단위 숫자로 입력해 주세요.") from None
+        if not isinstance(text, str) or not text.strip() or len(text) > 20_000:
+            raise RequestError("AI 음성 문장은 1~20,000자여야 합니다.")
+        if not isinstance(voiceover_id, str) or not CAPTION_ID.fullmatch(voiceover_id) or voiceover_id in used_ids:
+            raise RequestError("AI 음성 ID는 중복되지 않는 문자열이어야 합니다.")
+        used_ids.add(voiceover_id)
+        if not math.isfinite(start) or start < 0 or start > 3600:
+            raise RequestError("AI 음성 시작 시간은 0~3,600초 범위여야 합니다.")
+        if not isinstance(gender, str) or gender not in VOICE_GENDERS:
+            raise RequestError("AI 음성 목소리는 male 또는 female이어야 합니다.")
+        if not isinstance(tone, str) or tone not in VOICE_TONES:
+            raise RequestError("AI 음성 어투 설정을 확인해 주세요.")
+        if not isinstance(language, str) or language not in VOICE_LANGUAGES:
+            raise RequestError("AI 음성 언어는 Korean 또는 English여야 합니다.")
+        if (
+            not isinstance(speed, (int, float))
+            or isinstance(speed, bool)
+            or not math.isfinite(speed)
+            or not 0.7 <= speed <= 1.3
+        ):
+            raise RequestError("AI 음성 속도는 0.7~1.3 범위여야 합니다.")
+        if (
+            not isinstance(volume, (int, float))
+            or isinstance(volume, bool)
+            or not math.isfinite(volume)
+            or not 0 <= volume <= 1
+        ):
+            raise RequestError("AI 음성 음량은 0~1 범위여야 합니다.")
+        voiceovers.append({
+            "id": voiceover_id,
+            "text": text.strip(),
+            "start": start,
+            "gender": gender,
+            "tone": tone,
+            "language": language,
+            "speed": float(speed),
+            "volume": float(volume),
+        })
+    return voiceovers
 
 
 def safe_video_filename(title: str) -> str:
@@ -639,6 +704,7 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         speed = request.get("speed", 1)
         gender = request.get("gender", "female")
         tone = request.get("tone", "calm")
+        language = request.get("language", "Korean")
         if not isinstance(text, str) or not text.strip() or len(text) > 20_000:
             send_json(self, 400, {"error": "읽을 문장은 1~20,000자여야 합니다."})
             return
@@ -647,6 +713,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             return
         if not isinstance(tone, str) or tone not in VOICE_TONES:
             send_json(self, 400, {"error": "음성 어투 프리셋을 선택해 주세요."})
+            return
+        if not isinstance(language, str) or language not in VOICE_LANGUAGES:
+            send_json(self, 400, {"error": "한국어 또는 영어 음성을 선택해 주세요."})
             return
         if not isinstance(speed, (int, float)) or isinstance(speed, bool) or not math.isfinite(speed) or not 0.7 <= speed <= 1.3:
             send_json(self, 400, {"error": "읽기 속도는 0.7~1.3 범위에서 선택해 주세요."})
@@ -658,7 +727,7 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         media_key = uuid.uuid4().hex
         audio_path = PROJECT_MEDIA_ROOT / f"{media_key}.wav"
         try:
-            VOICE.generate(text.strip(), gender, tone, float(speed), audio_path)
+            VOICE.generate(text.strip(), gender, tone, float(speed), audio_path, language)
             duration = probe_audio_duration(audio_path)
             with MEDIA_FILES_LOCK:
                 MEDIA_FILES[media_key] = audio_path
@@ -783,6 +852,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             if not isinstance(requested_title, str) or len(requested_title) > 500:
                 raise RequestError("title은 500자 이내의 문자열이어야 합니다.")
             captions = normalize_api_captions(request.get("captions", []))
+            voiceover_requests = normalize_api_voiceovers(request.get("voiceovers", []))
+            source_volume = request.get("source_volume", 1)
+            duck_source_during_voiceover = request.get("duck_source_during_voiceover", True)
             provisional_duration = max(1, round(float(end - start) * DEFAULT_FPS))
             provisional_captions = [
                 {
@@ -794,6 +866,8 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             validate_render_props({
                 "fps": DEFAULT_FPS,
                 "durationInFrames": provisional_duration,
+                "sourceVolume": source_volume,
+                "duckSourceDuringVoiceover": duck_source_during_voiceover,
                 "captions": provisional_captions,
             })
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -806,8 +880,12 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         if not (ROOT / "node_modules" / ".bin" / "remotion").exists():
             send_json(self, 503, {"error": "Remotion 설치가 필요합니다. README의 npm 설치 명령을 실행해 주세요."})
             return
+        if voiceover_requests and not VOICE.status()["available"]:
+            send_json(self, 503, {"error": VOICE.unavailable_message()})
+            return
 
         response_started = False
+        generated_voice_keys: list[str] = []
         try:
             with tempfile.TemporaryDirectory(prefix="makeshort-api-") as temp_dir:
                 temp_root = Path(temp_dir)
@@ -823,10 +901,49 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                     } if caption["_endAtClipEnd"] else caption
                     for caption in captions
                 ]
+                render_voiceovers: list[dict[str, object]] = []
+                for voiceover_request in voiceover_requests:
+                    asset_key = uuid.uuid4().hex
+                    audio_path = PROJECT_MEDIA_ROOT / f"{asset_key}.wav"
+                    try:
+                        VOICE.generate(
+                            str(voiceover_request["text"]),
+                            str(voiceover_request["gender"]),
+                            str(voiceover_request["tone"]),
+                            float(voiceover_request["speed"]),
+                            audio_path,
+                            str(voiceover_request["language"]),
+                        )
+                        audio_duration = probe_audio_duration(audio_path)
+                    except Exception:
+                        audio_path.unlink(missing_ok=True)
+                        raise
+                    with MEDIA_FILES_LOCK:
+                        MEDIA_FILES[asset_key] = audio_path
+                        PROJECT_MEDIA_KEYS.add(asset_key)
+                    generated_voice_keys.append(asset_key)
+                    render_voiceovers.append({
+                        "id": voiceover_request["id"],
+                        "assetKey": asset_key,
+                        "start": voiceover_request["start"],
+                        "duration": audio_duration,
+                        "volume": voiceover_request["volume"],
+                    })
+
+                composition_frames = max(
+                    frame_count,
+                    math.ceil(max(
+                        (float(voiceover["start"]) + float(voiceover["duration"])) * fps
+                        for voiceover in render_voiceovers
+                    )) if render_voiceovers else frame_count,
+                )
                 props = validate_render_props({
                     "fps": fps,
-                    "durationInFrames": frame_count,
+                    "durationInFrames": composition_frames,
+                    "sourceVolume": source_volume,
+                    "duckSourceDuringVoiceover": duck_source_during_voiceover,
                     "captions": render_captions,
+                    "voiceovers": render_voiceovers,
                 })
                 title = requested_title.strip() or youtube_title
                 output_path = temp_root / "captioned.mp4"
@@ -858,6 +975,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             logger.exception("YouTube download failed for %s", video_id)
             if not response_started:
                 send_json(self, 422, {"error": "영상을 가져오지 못했습니다. 공개 영상인지, 링크가 정확한지 확인해 주세요."})
+        except VoiceError as exc:
+            if not response_started:
+                send_json(self, 400, {"error": str(exc)})
         except RequestError as exc:
             if not response_started:
                 send_json(self, 400, {"error": str(exc)})
@@ -868,6 +988,13 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                     send_json(self, 500, {"error": "클립을 합성하는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
                 except (BrokenPipeError, ConnectionResetError):
                     pass
+        finally:
+            with MEDIA_FILES_LOCK:
+                for asset_key in generated_voice_keys:
+                    audio_path = MEDIA_FILES.pop(asset_key, None)
+                    PROJECT_MEDIA_KEYS.discard(asset_key)
+                    if audio_path is not None:
+                        audio_path.unlink(missing_ok=True)
 
     def render_composite(self) -> None:
         try:
@@ -1015,8 +1142,17 @@ def validate_render_props(props: object) -> dict[str, object]:
         duration_frames = int(props.get("durationInFrames", 0))
     except (TypeError, ValueError):
         raise RequestError("클립의 프레임레이트와 길이를 확인해 주세요.") from None
+    try:
+        source_volume = float(props.get("sourceVolume", 1))
+    except (TypeError, ValueError):
+        raise RequestError("원본 영상 음량을 확인해 주세요.") from None
+    duck_source_during_voiceover = props.get("duckSourceDuringVoiceover", True)
     if not math.isfinite(frame_rate) or frame_rate < 1 or frame_rate > 120:
         raise RequestError("프레임레이트를 확인해 주세요.")
+    if isinstance(props.get("sourceVolume", 1), bool) or not math.isfinite(source_volume) or not 0 <= source_volume <= 1:
+        raise RequestError("원본 영상 음량은 0~1 범위여야 합니다.")
+    if not isinstance(duck_source_during_voiceover, bool):
+        raise RequestError("AI 음성 중 원본 음량 자동 조절 값을 확인해 주세요.")
     if duration_frames < 1 or duration_frames > frame_rate * 3600:
         raise RequestError("클립 길이는 1초 이상 1시간 이하여야 합니다.")
     captions = props.get("captions", [])
@@ -1165,6 +1301,8 @@ def validate_render_props(props: object) -> dict[str, object]:
     return {
         "fps": frame_rate,
         "durationInFrames": duration_frames,
+        "sourceVolume": source_volume,
+        "duckSourceDuringVoiceover": duck_source_during_voiceover,
         "captions": checked,
         "images": checked_images,
         "voiceovers": checked_voiceovers,

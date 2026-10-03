@@ -262,6 +262,14 @@ input::placeholder { color: #b4b5ae; }
 .remotion-player-wrap { width: min(100%, 315px); aspect-ratio: 9 / 16; margin: 0 auto; overflow: hidden; border-radius: 9px; background: #050505; box-shadow: 0 5px 18px rgba(0,0,0,.12); }
 .player-hint { margin-top: 10px; color: #999a90; text-align: center; font-size: 9px; }
 .player-hint span { color: #9fbe36; }
+.source-audio-volume { display: grid; gap: 5px; max-width: 420px; margin: 14px auto 1px; padding: 10px 12px; border: 1px solid #e8e9e2; border-radius: 8px; background: #fff; }
+.source-audio-volume-heading { display: flex; align-items: center; justify-content: space-between; color: #696b61; font-size: 9px; }
+.source-audio-volume-heading b { color: #788f2e; font-variant-numeric: tabular-nums; }
+.source-audio-volume input { width: 100%; margin: 0; accent-color: #a9c83a; }
+.source-audio-volume small { color: #999a90; font-size: 8px; }
+.source-audio-ducking { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: #686a60; font-size: 8px; }
+.source-audio-ducking input { width: 13px; height: 13px; margin: 0; accent-color: #a9c83a; }
+.source-audio-ducking small { margin-left: auto; }
 .caption-panel { padding: 15px; background: #fff; }
 .caption-panel-heading, .timeline-heading, .inspector-label-row, .inspector-section-title { display: flex; align-items: center; justify-content: space-between; }
 .caption-panel-heading { margin-bottom: 11px; }

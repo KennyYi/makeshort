@@ -45,24 +45,35 @@ QWEN_TTS_PYTHON="$PWD/.venv-qwen/bin/python" python app.py
 
 ## JSON 합성 API
 
-`POST http://127.0.0.1:8000/api/create`에 YouTube 구간과 자막 설정을 JSON으로 보내면 MP4를 반환합니다.
+`POST http://127.0.0.1:8000/api/create`에 YouTube 구간, 자막, 선택적으로 읽을 문장을 JSON으로 보내면 AI 음성 생성과 Remotion 합성을 거친 MP4를 반환합니다. AI 음성 생성에는 로컬 Qwen 모델이 설치되어 있어야 합니다.
+
+영어 내레이션을 생성하는 영화 소개 예제: [요청 JSON](examples/night_of_the_living_dead.json) · [전체 영상 (MP4)](examples/night_of_the_living_dead_english_1h24.mp4). 아래 미리보기는 첫 5초의 무음 GIF이며, 클릭하면 전체 영상이 열립니다.
+
+[![Night of the Living Dead 영어 내레이션 5초 미리보기](examples/night_of_the_living_dead_preview.gif)](examples/night_of_the_living_dead_english_1h24.mp4)
 
 ```json
 {
   "url": "https://www.youtube.com/watch?v=f5_wn8mexmM",
   "start": "01:23", "end": "01:35", "title": "공연 하이라이트",
-  "mode": "fit", "include_audio": false,
+  "mode": "fit", "include_audio": true,
+  "source_volume": 0.8, "duck_source_during_voiceover": true,
   "captions": [{
     "text": "하이라이트", "start": 0, "end": 8,
     "position": "bottom-center", "positionX": 50, "positionY": 88,
     "boxWidth": 84, "boxHeight": 10,
     "font": "do-hyeon", "fontSize": 72, "color": "#ffffff",
     "animation": "pop", "decoration": "outline"
+  }],
+  "voiceovers": [{
+    "text": "지금부터 공연의 하이라이트를 소개합니다.",
+    "start": 2.5, "gender": "female", "tone": "narration",
+    "language": "Korean",
+    "speed": 1.0, "volume": 1.0
   }]
 }
 ```
 
-`start`·`end`는 원본 영상 시간, 자막 시간은 클립 시작 기준입니다. 자막 `end`를 생략하면 클립 끝까지 표시합니다. `title` 생략 시 YouTube 제목을 파일명으로 사용합니다. `include_audio` 기본값은 `true`; `mode`는 `fill` 또는 `fit`입니다. 위치 좌표와 상자 크기는 화면 기준 퍼센트입니다.
+`start`·`end`는 원본 영상 시간, 자막과 AI 음성 `start`는 클립 시작 기준 초입니다. `voiceovers`에는 읽을 문장만 넣으며, 음성 길이는 생성 후 자동으로 계산됩니다. `language`는 `Korean` 또는 `English`이고 생략 시 한국어입니다. 목소리 `gender`는 `male` 또는 `female`, `tone`은 `calm`, `playful`, `angry`, `whisper`, `bright`, `sad`, `confident`, `narration` 중 하나입니다. `speed`와 트랙 `volume`은 각각 0.7~1.3, 0~1이며 생략 시 1입니다. 음성이 끝까지 포함되도록 필요한 경우 출력 길이가 늘어납니다. `duck_source_during_voiceover`가 `true`이면 AI 음성 구간에 원본 소리를 설정 음량의 20%까지 자동으로 낮춥니다. `source_volume` 기본값은 1, `include_audio` 기본값은 `true`; `mode`는 `fill` 또는 `fit`입니다. 자막 `end`를 생략하면 클립 끝까지 표시하고, `title`을 생략하면 YouTube 제목을 파일명으로 사용합니다. 위치 좌표와 상자 크기는 화면 기준 퍼센트입니다.
 
 폰트 ID: `noto`, `black-han`, `serif`, `do-hyeon`, `gowun-dodum`, `gowun-batang`, `nanum-gothic`, `system`. 애니메이션: `none`, `fade`, `pop`, `typewriter`. 효과: `none`, `shadow`, `outline`, `box`. Do Hyeon, Gowun Dodum, Gowun Batang, Nanum Gothic은 SIL Open Font License로 제공됩니다([라이선스 정보](https://github.com/google/fonts/tree/main/ofl)). Google Fonts 접속이 안 되면 시스템 폰트로 대체됩니다.
 

@@ -26,6 +26,8 @@ VOICE_GENDERS = {
     "female": {"label": "여성", "speaker": "Sohee"},
 }
 
+VOICE_LANGUAGES = {"Korean", "English"}
+
 VOICE_TONES = {
     "calm": {
         "label": "차분함",
@@ -57,7 +59,7 @@ VOICE_TONES = {
     },
     "narration": {
         "label": "내레이션",
-        "instruction": "Deliver polished Korean narration with even pacing, crisp diction, and balanced expressive emphasis.",
+        "instruction": "Deliver polished narration with even pacing, crisp diction, and balanced expressive emphasis.",
     },
 }
 
@@ -197,13 +199,23 @@ class VoiceManager:
             raise VoiceError(f"Qwen3-TTS 음성 생성기를 시작하지 못했습니다: {exc}") from None
         return self._worker
 
-    def generate(self, text: str, gender: str, tone: str, speed: float, output_path: Path) -> None:
+    def generate(
+        self,
+        text: str,
+        gender: str,
+        tone: str,
+        speed: float,
+        output_path: Path,
+        language: str = "Korean",
+    ) -> None:
         if not isinstance(text, str) or not text.strip() or len(text) > 20_000:
             raise VoiceError("읽을 문장은 1~20,000자여야 합니다.")
         if not isinstance(gender, str) or gender not in VOICE_GENDERS:
             raise VoiceError("남성 또는 여성 음성을 선택해 주세요.")
         if not isinstance(tone, str) or tone not in VOICE_TONES:
             raise VoiceError("음성 어투 프리셋을 선택해 주세요.")
+        if not isinstance(language, str) or language not in VOICE_LANGUAGES:
+            raise VoiceError("한국어 또는 영어 음성을 선택해 주세요.")
         if not isinstance(speed, (int, float)) or not MIN_SPEED <= float(speed) <= MAX_SPEED:
             raise VoiceError("읽기 속도는 0.7~1.3 범위에서 선택해 주세요.")
 
@@ -213,6 +225,7 @@ class VoiceManager:
         ))
         request = {
             "text": text.strip(),
+            "language": language,
             "speaker": VOICE_GENDERS[gender]["speaker"],
             "instruct": instruction,
             "model_path": str(self._model_path) if self._model_path else "",

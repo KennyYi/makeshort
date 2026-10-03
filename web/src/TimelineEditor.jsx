@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Player } from "@remotion/player";
 import { CaptionVideo } from "./remotion/CaptionVideo.jsx";
 import { SocialDistribution } from "./SocialDistribution.jsx";
@@ -128,6 +128,8 @@ const copyTextToClipboard = async (text) => {
 export const TimelineEditor = () => {
   const [clip, setClip] = useState(null);
   const [clipUrl, setClipUrl] = useState("");
+  const [sourceVolume, setSourceVolume] = useState(1);
+  const [duckSourceDuringVoiceover, setDuckSourceDuringVoiceover] = useState(true);
   const [videoTitle, setVideoTitle] = useState("");
   const [duration, setDuration] = useState(30);
   const [durationEdited, setDurationEdited] = useState(false);
@@ -165,6 +167,11 @@ export const TimelineEditor = () => {
   const dragRef = useRef(null);
   const imageInputRef = useRef(null);
   const videoInputRef = useRef(null);
+  const latestTimelineStateRef = useRef(null);
+
+  useLayoutEffect(() => {
+    latestTimelineStateRef.current = { captions, duration, durationEdited, images, voiceovers };
+  }, [captions, duration, durationEdited, images, voiceovers]);
 
   const durationInFrames = Math.max(1, Math.round(duration * frameRate));
   const outputFilename = filenameForTitle(videoTitle);
@@ -186,18 +193,20 @@ export const TimelineEditor = () => {
 
   const acceptClip = useCallback((detail) => {
     if (!detail?.blob || !Number.isFinite(detail.duration) || detail.duration <= 0) return;
+    const latest = latestTimelineStateRef.current;
     const nextClipUrl = URL.createObjectURL(detail.blob);
     setClip(detail.blob);
+    setSourceVolume(1);
     setClipUrl((current) => {
       if (current) URL.revokeObjectURL(current);
       return nextClipUrl;
     });
     setVideoTitle(detail.title || String(detail.name || "클립").replace(/\.[^.]+$/, ""));
-    const overlayEnd = Math.max(0, ...captions.map((caption) => caption.end), ...images.map((image) => image.end), ...voiceovers.map((voiceover) => voiceover.start + voiceover.duration));
-    if (!durationEdited && overlayEnd === 0) {
+    const overlayEnd = Math.max(0, ...latest.captions.map((caption) => caption.end), ...latest.images.map((image) => image.end), ...latest.voiceovers.map((voiceover) => voiceover.start + voiceover.duration));
+    if (!latest.durationEdited && overlayEnd === 0) {
       setDuration(detail.duration);
     } else {
-      setDuration(Math.max(detail.duration, overlayEnd, durationEdited ? duration : 0));
+      setDuration(Math.max(detail.duration, overlayEnd, latest.durationEdited ? latest.duration : 0));
     }
     setFrameRate(Number.isFinite(detail.fps) && detail.fps >= 1 && detail.fps <= 120 ? detail.fps : DEFAULT_FPS);
     setSelectedImageId(null);
@@ -209,7 +218,7 @@ export const TimelineEditor = () => {
     });
     setRenderedBlob(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }, [captions, duration, durationEdited, images, voiceovers]);
+  }, []);
 
   useEffect(() => {
     const player = playerRef.current;
@@ -513,6 +522,7 @@ export const TimelineEditor = () => {
     if (clipUrl) URL.revokeObjectURL(clipUrl);
     setClip(null);
     setClipUrl("");
+    setSourceVolume(1);
     setVideoTitle("");
     setCurrentFrame(0);
     playerRef.current?.seekTo(0);
@@ -706,6 +716,8 @@ export const TimelineEditor = () => {
       const props = {
         fps: frameRate,
         durationInFrames,
+        sourceVolume,
+        duckSourceDuringVoiceover,
         captions: captions.map(({ id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration }) => ({
           id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration,
         })),
@@ -754,6 +766,8 @@ export const TimelineEditor = () => {
     voiceovers.forEach((voiceover) => deleteProjectAsset(voiceover.assetKey));
     setClip(null);
     setClipUrl("");
+    setSourceVolume(1);
+    setDuckSourceDuringVoiceover(true);
     setVideoTitle("");
     setRenderedUrl("");
     setRenderedBlob(null);
@@ -881,7 +895,7 @@ export const TimelineEditor = () => {
             <Player
               ref={playerRef}
               component={CaptionVideo}
-              inputProps={{ src: clipUrl, captions, images: images.map((image) => ({ ...image, src: image.previewUrl })), voiceovers, selectedId, onCaptionPointerDown: beginPositionDrag, onCaptionPointerMove: movePositionDrag, onCaptionPointerUp: finishPositionDrag }}
+              inputProps={{ src: clipUrl, sourceVolume, duckSourceDuringVoiceover, captions, images: images.map((image) => ({ ...image, src: image.previewUrl })), voiceovers, selectedId, onCaptionPointerDown: beginPositionDrag, onCaptionPointerMove: movePositionDrag, onCaptionPointerUp: finishPositionDrag }}
               durationInFrames={durationInFrames}
               fps={frameRate}
               compositionWidth={1080}
@@ -893,6 +907,20 @@ export const TimelineEditor = () => {
             />
           </div>
           <div className="player-hint"><span>✦</span> 이미지와 텍스트를 원하는 시점에 추가하고, 결과를 바로 확인할 수 있어요.</div>
+          {clip && (
+            <div className="source-audio-volume">
+              <span className="source-audio-volume-heading"><strong>원본 영상 소리</strong><b>{Math.round(sourceVolume * 100)}%</b></span>
+              <input aria-label="원본 영상 소리 음량" type="range" min="0" max="1" step="0.05" disabled={rendering} value={sourceVolume} onChange={(event) => {
+                setSourceVolume(Number(event.target.value));
+                clearRendered();
+              }} />
+              <small>AI 음성과 겹쳐 재생되는 원본 사운드의 음량</small>
+              <label className="source-audio-ducking"><input type="checkbox" disabled={rendering} checked={duckSourceDuringVoiceover} onChange={(event) => {
+                setDuckSourceDuringVoiceover(event.target.checked);
+                clearRendered();
+              }} /><span>AI 음성 재생 중 원본 소리 자동 낮춤</span><small>음성 구간에서 원본 음량의 20%</small></label>
+            </div>
+          )}
         </section>
 
         <aside className="caption-panel" aria-label="영상 레이어 설정">

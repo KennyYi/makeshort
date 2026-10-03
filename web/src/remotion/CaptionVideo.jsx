@@ -29,6 +29,27 @@ const FONT = {
   system: '"Apple SD Gothic Neo", sans-serif',
 };
 
+const getSourceVolumeAtFrame = (frame, fps, voiceovers, duckEnabled) => {
+  if (!duckEnabled || voiceovers.length === 0) return 1;
+  const defaultFadeFrames = Math.max(1, Math.round(fps * 0.15));
+  return voiceovers.reduce((volume, voiceover) => {
+    const start = Math.max(0, Math.round(voiceover.start * fps));
+    const end = Math.max(start + 1, Math.ceil((voiceover.start + voiceover.duration) * fps));
+    const fadeFrames = Math.min(defaultFadeFrames, Math.max(1, Math.floor((end - start) / 2)));
+    const fadeOutStart = Math.max(start, end - fadeFrames);
+    if (frame < start || frame >= end) return volume;
+    let voiceVolume = 1;
+    if (frame < start + fadeFrames) {
+      voiceVolume = interpolate(frame, [start, start + fadeFrames], [1, 0.2], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+    } else if (frame < end) {
+      voiceVolume = frame < fadeOutStart
+        ? 0.2
+        : interpolate(frame, [fadeOutStart, end], [0.2, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+    }
+    return Math.min(volume, voiceVolume);
+  }, 1);
+};
+
 const Decoration = ({ kind, children }) => {
   const style = {
     shadow: { textShadow: "0 5px 20px rgba(0,0,0,.8)" },
@@ -105,11 +126,11 @@ const Caption = ({ caption, selectedId, onPointerDown, onPointerMove, onPointerU
   );
 };
 
-export const CaptionVideo = ({ src, captions = [], images = [], voiceovers = [], selectedId = null, onCaptionPointerDown, onCaptionPointerMove, onCaptionPointerUp }) => {
+export const CaptionVideo = ({ src, sourceVolume = 1, duckSourceDuringVoiceover = true, captions = [], images = [], voiceovers = [], selectedId = null, onCaptionPointerDown, onCaptionPointerMove, onCaptionPointerUp }) => {
   const { fps, durationInFrames } = useVideoConfig();
   return (
     <AbsoluteFill style={{ backgroundColor: "#000", overflow: "hidden" }}>
-      {src ? <OffthreadVideo src={src} style={{ width: "100%", height: "100%", objectFit: "fill" }} /> : null}
+      {src ? <OffthreadVideo src={src} volume={(frame) => sourceVolume * getSourceVolumeAtFrame(frame, fps, voiceovers, duckSourceDuringVoiceover)} style={{ width: "100%", height: "100%", objectFit: "fill" }} /> : null}
       {images.map((image) => {
         const from = Math.max(0, Math.round(image.start * fps));
         const end = Math.min(durationInFrames, Math.round(image.end * fps));

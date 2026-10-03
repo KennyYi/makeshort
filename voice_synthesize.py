@@ -38,11 +38,14 @@ def synthesize(model, request: dict) -> None:
     import soundfile as sf
 
     text = request.get("text")
+    language = request.get("language", "Korean")
     speaker = request.get("speaker")
     instruct = request.get("instruct")
     output_path = Path(request.get("output_path", "")).resolve()
     if not isinstance(text, str) or not text.strip():
         raise ValueError("읽을 문장을 입력해 주세요.")
+    if not isinstance(language, str) or language not in {"Korean", "English"}:
+        raise ValueError("한국어 또는 영어 음성을 선택해 주세요.")
     if speaker not in {"Ryan", "Sohee"}:
         raise ValueError("선택한 음성 preset을 확인해 주세요.")
     if not isinstance(instruct, str):
@@ -54,7 +57,7 @@ def synthesize(model, request: dict) -> None:
         with contextlib.redirect_stdout(sys.stderr):
             waves, sample_rate = model.generate_custom_voice(
                 text=text.strip(),
-                language="Korean",
+                language=language,
                 speaker=speaker,
                 instruct=instruct,
             )
