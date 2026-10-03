@@ -1,0 +1,139 @@
+{
+  "url": "https://www.youtube.com/watch?v=H91BxkBXttE",
+  "start": "01:24:00",
+  "end": "01:24:30",
+  "title": "Night of the Living Dead - Symbolism and Public Domain",
+  "mode": "fit",
+  "include_audio": true,
+  "source_volume": 0.35,
+  "duck_source_during_voiceover": true,
+  "captions": [
+    {
+      "id": "caption_1",
+      "text": "More than a monster movie, Night of the Living Dead turns social fear into horror.",
+      "start": 0.0,
+      "end": 5.49,
+      "position": "bottom-center",
+      "positionX": 50,
+      "positionY": 89,
+      "boxWidth": 92,
+      "boxHeight": 16,
+      "font": "system",
+      "fontSize": 44,
+      "color": "#ffffff",
+      "animation": "fade",
+      "decoration": "shadow"
+    },
+    {
+      "id": "caption_2",
+      "text": "Ben's struggle to be heard gives the film a lasting racial subtext.",
+      "start": 5.49,
+      "end": 10.58,
+      "position": "bottom-center",
+      "positionX": 50,
+      "positionY": 89,
+      "boxWidth": 92,
+      "boxHeight": 16,
+      "font": "system",
+      "fontSize": 44,
+      "color": "#ffffff",
+      "animation": "fade",
+      "decoration": "shadow"
+    },
+    {
+      "id": "caption_3",
+      "text": "The survivors' mistrust suggests division can be as deadly as the undead.",
+      "start": 10.58,
+      "end": 17.19,
+      "position": "bottom-center",
+      "positionX": 50,
+      "positionY": 89,
+      "boxWidth": 92,
+      "boxHeight": 16,
+      "font": "system",
+      "fontSize": 44,
+      "color": "#ffffff",
+      "animation": "fade",
+      "decoration": "shadow"
+    },
+    {
+      "id": "caption_4",
+      "text": "Its bleak black-and-white images make ordinary America feel unstable.",
+      "start": 17.19,
+      "end": 22.52,
+      "position": "bottom-center",
+      "positionX": 50,
+      "positionY": 89,
+      "boxWidth": 92,
+      "boxHeight": 16,
+      "font": "system",
+      "fontSize": 44,
+      "color": "#ffffff",
+      "animation": "fade",
+      "decoration": "shadow"
+    },
+    {
+      "id": "caption_5",
+      "text": "Its U.S. public-domain status traces to an omitted 1968 copyright notice.",
+      "start": 22.52,
+      "end": 30,
+      "position": "bottom-center",
+      "positionX": 50,
+      "positionY": 89,
+      "boxWidth": 92,
+      "boxHeight": 16,
+      "font": "system",
+      "fontSize": 44,
+      "color": "#ffffff",
+      "animation": "fade",
+      "decoration": "shadow"
+    }
+  ],
+  "voiceovers": [
+    {
+      "text": "More than a monster movie, Night of the Living Dead turns social fear into horror.",
+      "start": 0.0,
+      "language": "English",
+      "gender": "male",
+      "tone": "calm",
+      "speed": 1.1,
+      "volume": 1.0
+    },
+    {
+      "text": "Ben's struggle to be heard gives the film a lasting racial subtext.",
+      "start": 5.49,
+      "language": "English",
+      "gender": "male",
+      "tone": "calm",
+      "speed": 1.1,
+      "volume": 1.0
+    },
+    {
+      "text": "The survivors' mistrust suggests division can be as deadly as the undead.",
+      "start": 10.58,
+      "language": "English",
+      "gender": "male",
+      "tone": "calm",
+      "speed": 1.1,
+      "volume": 1.0
+    },
+    {
+      "text": "Its bleak black-and-white images make ordinary America feel unstable.",
+      "start": 17.19,
+      "language": "English",
+      "gender": "male",
+      "tone": "calm",
+      "speed": 1.1,
+      "volume": 1.0
+    },
+    {
+      "text": "Its U.S. public-domain status traces to an omitted 1968 copyright notice.",
+      "start": 22.52,
+      "language": "English",
+      "gender": "male",
+      "tone": "calm",
+      "speed": 1.1,
+      "volume": 1.0
+    }
+  ]
+}
