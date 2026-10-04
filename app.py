@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import yt_dlp
 from social import SocialError, SocialManager
-from voice import VOICE_GENDERS, VOICE_LANGUAGES, VOICE_TONES, VoiceError, VoiceManager
+from voice import VOICE_AGE_GROUPS, VOICE_GENDERS, VOICE_LANGUAGES, VOICE_TONES, VoiceError, VoiceManager
 
 
 ROOT = Path(__file__).resolve().parent
@@ -300,6 +300,7 @@ def normalize_api_voiceovers(value: object) -> list[dict[str, object]]:
             raise RequestError("AI 음성 설정은 JSON 객체여야 합니다.")
         text = item.get("text")
         gender = item.get("gender", "female")
+        age_group = item.get("age_group", "young_adult")
         tone = item.get("tone", "calm")
         language = item.get("language", "Korean")
         speed = item.get("speed", 1)
@@ -321,6 +322,8 @@ def normalize_api_voiceovers(value: object) -> list[dict[str, object]]:
             raise RequestError("AI 음성 시작 시간은 0~3,600초 범위여야 합니다.")
         if not isinstance(gender, str) or gender not in VOICE_GENDERS:
             raise RequestError("AI 음성 목소리는 male 또는 female이어야 합니다.")
+        if not isinstance(age_group, str) or age_group not in VOICE_AGE_GROUPS:
+            raise RequestError("AI 음성 연령대를 확인해 주세요.")
         if not isinstance(tone, str) or tone not in VOICE_TONES:
             raise RequestError("AI 음성 어투 설정을 확인해 주세요.")
         if not isinstance(language, str) or language not in VOICE_LANGUAGES:
@@ -344,6 +347,7 @@ def normalize_api_voiceovers(value: object) -> list[dict[str, object]]:
             "text": text.strip(),
             "start": start,
             "gender": gender,
+            "age_group": age_group,
             "tone": tone,
             "language": language,
             "speed": float(speed),
@@ -582,12 +586,21 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         if route == "/api/social/disconnect":
             self._social_disconnect()
             return
+        if route == "/api/social/groups/save":
+            self._social_group_save()
+            return
+        if route == "/api/social/groups/delete":
+            self._social_group_delete()
+            return
         if route == "/api/social/select-account":
             self._social_select_account()
             return
         if route == "/api/social/tiktok/creator-info":
+            request = self._read_social_json()
+            if request is None:
+                return
             try:
-                send_json(self, 200, SOCIAL.tiktok_creator_info())
+                send_json(self, 200, SOCIAL.tiktok_creator_info(request.get("account_id")))
             except SocialError as exc:
                 send_json(self, 400, {"error": str(exc)})
             return
@@ -703,6 +716,7 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         text = request.get("text")
         speed = request.get("speed", 1)
         gender = request.get("gender", "female")
+        age_group = request.get("age_group", "young_adult")
         tone = request.get("tone", "calm")
         language = request.get("language", "Korean")
         if not isinstance(text, str) or not text.strip() or len(text) > 20_000:
@@ -710,6 +724,9 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             return
         if not isinstance(gender, str) or gender not in VOICE_GENDERS:
             send_json(self, 400, {"error": "남성 또는 여성 음성을 선택해 주세요."})
+            return
+        if not isinstance(age_group, str) or age_group not in VOICE_AGE_GROUPS:
+            send_json(self, 400, {"error": "음성 연령대를 선택해 주세요."})
             return
         if not isinstance(tone, str) or tone not in VOICE_TONES:
             send_json(self, 400, {"error": "음성 어투 프리셋을 선택해 주세요."})
@@ -727,7 +744,7 @@ class MakeShortHandler(BaseHTTPRequestHandler):
         media_key = uuid.uuid4().hex
         audio_path = PROJECT_MEDIA_ROOT / f"{media_key}.wav"
         try:
-            VOICE.generate(text.strip(), gender, tone, float(speed), audio_path, language)
+            VOICE.generate(text.strip(), gender, tone, float(speed), audio_path, language, age_group)
             duration = probe_audio_duration(audio_path)
             with MEDIA_FILES_LOCK:
                 MEDIA_FILES[media_key] = audio_path
@@ -741,14 +758,36 @@ class MakeShortHandler(BaseHTTPRequestHandler):
             logger.exception("Could not prepare generated voice audio")
             send_json(self, 500, {"error": "생성된 음성을 편집기에 추가하지 못했습니다."})
             return
-        send_json(self, 201, {"assetKey": media_key, "duration": duration, "voice": VOICE.describe(gender, tone)})
+        send_json(self, 201, {
+            "assetKey": media_key,
+            "duration": duration,
+            "voice": VOICE.describe(gender, tone, age_group),
+        })
 
     def _social_disconnect(self) -> None:
         request = self._read_social_json()
         if request is None:
             return
         try:
-            send_json(self, 200, SOCIAL.disconnect(request.get("provider")))
+            send_json(self, 200, SOCIAL.disconnect(request.get("provider"), request.get("account_id")))
+        except SocialError as exc:
+            send_json(self, 400, {"error": str(exc)})
+
+    def _social_group_save(self) -> None:
+        request = self._read_social_json()
+        if request is None:
+            return
+        try:
+            send_json(self, 200, SOCIAL.save_group(request.get("id"), request.get("name"), request.get("accounts")))
+        except SocialError as exc:
+            send_json(self, 400, {"error": str(exc)})
+
+    def _social_group_delete(self) -> None:
+        request = self._read_social_json()
+        if request is None:
+            return
+        try:
+            send_json(self, 200, SOCIAL.delete_group(request.get("id")))
         except SocialError as exc:
             send_json(self, 400, {"error": str(exc)})
 
@@ -913,6 +952,7 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                             float(voiceover_request["speed"]),
                             audio_path,
                             str(voiceover_request["language"]),
+                            str(voiceover_request["age_group"]),
                         )
                         audio_duration = probe_audio_duration(audio_path)
                     except Exception:

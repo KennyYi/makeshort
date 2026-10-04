@@ -5,6 +5,7 @@ web/dist/
 __pycache__/
 *.py[cod]
 .DS_Store
+.env.local
 .env
 .env.*
 *.log

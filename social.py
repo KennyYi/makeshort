@@ -9,7 +9,9 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -19,7 +21,6 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
-
 
 GRAPH_VERSION = "v26.0"
 GRAPH_ROOT = f"https://graph.facebook.com/{GRAPH_VERSION}"
@@ -31,10 +32,52 @@ TIKTOK_CHUNK_BYTES = 10 * 1024 * 1024
 KEYRING_SERVICE = "makeshort.social"
 logger = logging.getLogger("makeshort.social")
 
+
+def _load_local_environment() -> None:
+    env_path = Path(__file__).resolve().parent / ".env.local"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("Could not read local environment file: %s", env_path)
+        return
+
+    for line in lines:
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if entry.startswith("export "):
+            entry = entry[7:].lstrip()
+        if "=" not in entry:
+            continue
+        name, raw_value = entry.split("=", 1)
+        name = name.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in os.environ:
+            continue
+        try:
+            parts = shlex.split(raw_value, comments=True, posix=True)
+        except ValueError:
+            logger.warning("Skipping malformed value for %s in .env.local", name)
+            continue
+        os.environ[name] = " ".join(parts)
+
+
+_load_local_environment()
+
 PROVIDERS = {
-    "youtube": {"label": "YouTube Shorts", "client_field": "client_id"},
-    "instagram": {"label": "Instagram Reels", "client_field": "app_id"},
-    "tiktok": {"label": "TikTok", "client_field": "client_key"},
+    "youtube": {
+        "label": "YouTube Shorts", "client_field": "client_id",
+        "client_env": "MAKESHORT_YOUTUBE_CLIENT_ID", "secret_env": "MAKESHORT_YOUTUBE_CLIENT_SECRET",
+    },
+    "instagram": {
+        "label": "Instagram Reels", "client_field": "app_id",
+        "client_env": "MAKESHORT_INSTAGRAM_APP_ID", "secret_env": "MAKESHORT_INSTAGRAM_APP_SECRET",
+    },
+    "tiktok": {
+        "label": "TikTok", "client_field": "client_key",
+        "client_env": "MAKESHORT_TIKTOK_CLIENT_KEY", "secret_env": "MAKESHORT_TIKTOK_CLIENT_SECRET",
+    },
 }
 
 
@@ -201,6 +244,86 @@ class SocialManager:
             except FileNotFoundError:
                 pass
 
+    def _token_key(self, provider: str, account_id: str) -> str:
+        digest = hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+        return f"tokens:{provider}:{digest}"
+
+    def _provider_accounts(self, accounts: dict[str, Any], provider: str) -> list[dict[str, str]]:
+        item = accounts.get(provider, {})
+        rows = item.get("accounts", []) if isinstance(item, dict) else []
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            account_id = row.get("id")
+            if not isinstance(account_id, str) or not account_id or account_id in seen:
+                continue
+            seen.add(account_id)
+            result.append({"id": account_id, "name": str(row.get("name") or PROVIDERS[provider]["label"])})
+        return result
+
+    def _selected_account_id(self, provider: str) -> str | None:
+        accounts = self._read_store(self.accounts_path)
+        item = accounts.get(provider, {})
+        rows = self._provider_accounts(accounts, provider)
+        selected = item.get("selected_id") if isinstance(item, dict) else None
+        if isinstance(selected, str) and any(row["id"] == selected for row in rows):
+            return selected
+        return rows[0]["id"] if rows else None
+
+    def _migrate_legacy_tokens(self, provider: str) -> None:
+        legacy_raw = self._get_secret(f"tokens:{provider}")
+        if not legacy_raw:
+            return
+        try:
+            legacy = json.loads(legacy_raw)
+        except json.JSONDecodeError:
+            raise SocialError("로컬 토큰 정보를 읽지 못했습니다. 플랫폼 계정을 다시 연결해 주세요.") from None
+        if not isinstance(legacy, dict):
+            return
+        accounts = self._read_store(self.accounts_path)
+        rows = self._provider_accounts(accounts, provider)
+        item = accounts.get(provider, {})
+        selected = item.get("selected_id") if isinstance(item, dict) else None
+        for row in rows:
+            account_id = row["id"]
+            token_key = self._token_key(provider, account_id)
+            if self._get_secret(token_key):
+                continue
+            account_tokens: dict[str, Any] | None = None
+            if provider == "instagram":
+                page = legacy.get("pages", {}).get(account_id) if isinstance(legacy.get("pages"), dict) else None
+                if isinstance(page, dict):
+                    account_tokens = {
+                        "user_access_token": legacy.get("user_access_token"),
+                        "pages": {account_id: page},
+                    }
+            elif account_id == selected or len(rows) == 1:
+                account_tokens = legacy
+            if account_tokens:
+                self._set_secret(token_key, json.dumps(account_tokens, ensure_ascii=False))
+
+    def _ensure_default_group(self, accounts: dict[str, Any]) -> dict[str, Any]:
+        groups = accounts.get("groups")
+        if isinstance(groups, list):
+            return accounts
+        assignments: dict[str, str] = {}
+        for provider in PROVIDERS:
+            item = accounts.get(provider, {})
+            rows = self._provider_accounts(accounts, provider)
+            selected = item.get("selected_id") if isinstance(item, dict) else None
+            if isinstance(selected, str) and any(row["id"] == selected for row in rows):
+                assignments[provider] = selected
+            elif rows:
+                assignments[provider] = rows[0]["id"]
+        if assignments:
+            accounts["groups"] = [{"id": secrets.token_urlsafe(12), "name": "기본 그룹", "accounts": assignments}]
+            self._write_store(self.accounts_path, accounts)
+        else:
+            accounts["groups"] = []
+        return accounts
+
     def _keyring(self):
         try:
             import keyring
@@ -241,8 +364,13 @@ class SocialManager:
 
     def _credentials(self, provider: str) -> tuple[str, str]:
         config = self._read_store(self.config_path).get(provider, {})
-        client_id = config.get("client_id") if isinstance(config, dict) else None
-        secret = self._get_secret(f"client-secret:{provider}")
+        definition = PROVIDERS[provider]
+        client_id = os.environ.get(definition["client_env"], "").strip()
+        if not client_id:
+            client_id = config.get("client_id") if isinstance(config, dict) else None
+        secret = os.environ.get(definition["secret_env"], "").strip()
+        if not secret:
+            secret = self._get_secret(f"client-secret:{provider}")
         if not isinstance(client_id, str) or not client_id or not secret:
             raise SocialError(f"{PROVIDERS[provider]['label']} 앱 키를 먼저 저장해 주세요.")
         return client_id, secret
@@ -268,6 +396,13 @@ class SocialManager:
             keyring_available = self._keyring() is not None
         except SocialError:
             keyring_available = False
+        if keyring_available:
+            for provider in PROVIDERS:
+                try:
+                    self._migrate_legacy_tokens(provider)
+                except SocialError:
+                    logger.warning("Could not migrate legacy %s account tokens", provider)
+        accounts = self._ensure_default_group(accounts)
         providers: dict[str, Any] = {}
         for provider, definition in PROVIDERS.items():
             item_config = config.get(provider, {})
@@ -276,53 +411,159 @@ class SocialManager:
                 has_secret = bool(self._get_secret(f"client-secret:{provider}")) if keyring_available else False
             except SocialError:
                 has_secret = False
-            try:
-                has_token = bool(self._get_secret(f"tokens:{provider}")) if keyring_available else False
-            except SocialError:
-                has_token = False
-            provider_accounts = item_account.get("accounts", []) if isinstance(item_account, dict) else []
+            definition_env = PROVIDERS[provider]
+            env_client_id = os.environ.get(definition_env["client_env"], "").strip()
+            env_secret = os.environ.get(definition_env["secret_env"], "").strip()
+            if env_secret:
+                has_secret = True
+            configured_client_id = env_client_id or (item_config.get("client_id") if isinstance(item_config, dict) else "")
+            provider_accounts = self._provider_accounts(accounts, provider)
+            selected_id = item_account.get("selected_id", "") if isinstance(item_account, dict) else ""
+            account_status = []
+            for account in provider_accounts:
+                try:
+                    connected = bool(self._load_tokens(provider, account["id"])) if keyring_available else False
+                except SocialError:
+                    connected = False
+                account_status.append({**account, "connected": connected})
+            selected_account = next((row for row in account_status if row["id"] == selected_id), None)
             providers[provider] = {
                 "label": definition["label"],
-                "configured": bool(isinstance(item_config, dict) and item_config.get("client_id") and has_secret),
-                "connected": has_token and bool(provider_accounts),
-                "account_name": item_account.get("account_name", "") if isinstance(item_account, dict) else "",
-                "account_id": item_account.get("account_id", "") if isinstance(item_account, dict) else "",
-                "accounts": [
-                    {"id": account.get("id", ""), "name": account.get("name", "")}
-                    for account in provider_accounts if isinstance(account, dict)
-                ],
-                "selected_id": item_account.get("selected_id", "") if isinstance(item_account, dict) else "",
+                "configured": bool(configured_client_id and has_secret),
+                "connected": any(account["connected"] for account in account_status),
+                "account_name": selected_account["name"] if selected_account else "",
+                "account_id": selected_id,
+                "accounts": account_status,
+                "selected_id": selected_id,
             }
         return {
             "keyring_available": keyring_available,
             "data_location": str(self.data_dir),
             "providers": providers,
+            "groups": [
+                {
+                    "id": group.get("id", ""),
+                    "name": group.get("name", ""),
+                    "accounts": group.get("accounts", {}),
+                }
+                for group in accounts.get("groups", [])
+                if isinstance(group, dict) and isinstance(group.get("accounts", {}), dict)
+            ],
         }
 
-    def disconnect(self, provider: str) -> dict[str, Any]:
+    def disconnect(self, provider: str, account_id: object = None) -> dict[str, Any]:
         if not isinstance(provider, str) or provider not in PROVIDERS:
             raise SocialError("지원하지 않는 플랫폼입니다.")
-        self._delete_secret(f"tokens:{provider}")
         with self.file_lock:
             accounts = self._read_store(self.accounts_path)
-            accounts.pop(provider, None)
+            item = accounts.get(provider, {})
+            rows = self._provider_accounts(accounts, provider)
+            if account_id is not None and (
+                not isinstance(account_id, str) or not any(row["id"] == account_id for row in rows)
+            ):
+                raise SocialError("연결 해제할 계정을 찾지 못했습니다.")
+            if account_id is None:
+                for row in rows:
+                    self._delete_secret(self._token_key(provider, row["id"]))
+                self._delete_secret(f"tokens:{provider}")
+                accounts.pop(provider, None)
+                for group in accounts.get("groups", []):
+                    if isinstance(group, dict):
+                        group.get("accounts", {}).pop(provider, None)
+            else:
+                # Copy a legacy single-account token before removing its old key.
+                # Validate the account first so an invalid request cannot erase it.
+                self._migrate_legacy_tokens(provider)
+                self._delete_secret(f"tokens:{provider}")
+                self._delete_secret(self._token_key(provider, account_id))
+                remaining = [row for row in rows if row["id"] != account_id]
+                selected_id = item.get("selected_id") if isinstance(item, dict) else ""
+                if selected_id == account_id:
+                    selected_id = remaining[0]["id"] if remaining else ""
+                if remaining:
+                    accounts[provider] = {
+                        **item,
+                        "accounts": remaining,
+                        "selected_id": selected_id,
+                        "account_id": selected_id,
+                        "account_name": next((row["name"] for row in remaining if row["id"] == selected_id), ""),
+                    }
+                else:
+                    accounts.pop(provider, None)
+                for group in accounts.get("groups", []):
+                    if isinstance(group, dict) and group.get("accounts", {}).get(provider) == account_id:
+                        group["accounts"].pop(provider, None)
             self._write_store(self.accounts_path, accounts)
         return self.status()
 
     def select_account(self, provider: str, account_id: object) -> dict[str, Any]:
-        if provider != "instagram" or not isinstance(account_id, str):
-            raise SocialError("선택할 Instagram 계정을 확인해 주세요.")
+        if not isinstance(provider, str) or provider not in PROVIDERS or not isinstance(account_id, str):
+            raise SocialError("선택할 플랫폼 계정을 확인해 주세요.")
         with self.file_lock:
             accounts = self._read_store(self.accounts_path)
-            item = accounts.get("instagram", {})
-            available = item.get("accounts", []) if isinstance(item, dict) else []
+            item = accounts.get(provider, {})
+            available = self._provider_accounts(accounts, provider)
             selected = next((row for row in available if row.get("id") == account_id), None)
             if not selected:
-                raise SocialError("연결된 Instagram 계정 목록에서 선택해 주세요.")
+                raise SocialError("연결된 계정 목록에서 선택해 주세요.")
             item["selected_id"] = account_id
             item["account_id"] = account_id
-            item["account_name"] = selected.get("name", "Instagram")
-            accounts["instagram"] = item
+            item["account_name"] = selected.get("name", PROVIDERS[provider]["label"])
+            accounts[provider] = item
+            self._write_store(self.accounts_path, accounts)
+        return self.status()
+
+    def save_group(self, group_id: object, name: object, assigned_accounts: object) -> dict[str, Any]:
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 60:
+            raise SocialError("그룹 이름은 1~60자여야 합니다.")
+        if not isinstance(assigned_accounts, dict):
+            raise SocialError("그룹 계정 설정을 확인해 주세요.")
+        with self.file_lock:
+            accounts = self._read_store(self.accounts_path)
+            groups = accounts.get("groups", [])
+            if not isinstance(groups, list):
+                groups = []
+            existing = None
+            if group_id is not None:
+                if not isinstance(group_id, str):
+                    raise SocialError("수정할 계정 그룹을 확인해 주세요.")
+                existing = next((group for group in groups if isinstance(group, dict) and group.get("id") == group_id), None)
+                if existing is None:
+                    raise SocialError("수정할 계정 그룹을 찾지 못했습니다.")
+            elif len(groups) >= 50:
+                raise SocialError("계정 그룹은 최대 50개까지 만들 수 있습니다.")
+
+            normalized: dict[str, str] = {}
+            for provider, selected_id in assigned_accounts.items():
+                if provider not in PROVIDERS:
+                    raise SocialError("그룹에 지원하지 않는 플랫폼이 포함되어 있습니다.")
+                if selected_id in (None, ""):
+                    continue
+                if not isinstance(selected_id, str) or not any(
+                    row["id"] == selected_id for row in self._provider_accounts(accounts, provider)
+                ):
+                    raise SocialError(f"{PROVIDERS[provider]['label']} 계정을 확인해 주세요.")
+                normalized[provider] = selected_id
+
+            if existing is None:
+                existing = {"id": secrets.token_urlsafe(12)}
+                groups.append(existing)
+            existing.update({"name": name.strip(), "accounts": normalized})
+            accounts["groups"] = groups
+            self._write_store(self.accounts_path, accounts)
+        return self.status()
+
+    def delete_group(self, group_id: object) -> dict[str, Any]:
+        if not isinstance(group_id, str) or not group_id:
+            raise SocialError("삭제할 계정 그룹을 확인해 주세요.")
+        with self.file_lock:
+            accounts = self._read_store(self.accounts_path)
+            groups = accounts.get("groups", [])
+            if not isinstance(groups, list) or not any(
+                isinstance(group, dict) and group.get("id") == group_id for group in groups
+            ):
+                raise SocialError("삭제할 계정 그룹을 찾지 못했습니다.")
+            accounts["groups"] = [group for group in groups if not isinstance(group, dict) or group.get("id") != group_id]
             self._write_store(self.accounts_path, accounts)
         return self.status()
 
@@ -347,7 +588,7 @@ class SocialManager:
                 "response_type": "code",
                 "scope": YOUTUBE_SCOPE,
                 "access_type": "offline",
-                "prompt": "consent",
+                "prompt": "select_account consent",
                 "include_granted_scopes": "true",
                 "state": state,
                 "code_challenge": challenge,
@@ -406,26 +647,22 @@ class SocialManager:
                     "redirect_uri": pending["redirect_uri"],
                 },
             )
-            old = self._load_tokens("youtube") or {}
+            token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
+            channel = request_json(
+                "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+                headers={"Authorization": f"Bearer {token['access_token']}"},
+            )
+            items = channel.get("items", [])
+            if not items or not items[0].get("id"):
+                raise SocialError("인증한 Google 계정에서 YouTube 채널을 찾지 못했습니다.")
+            channel_id = str(items[0]["id"])
+            channel_name = items[0].get("snippet", {}).get("title") or "YouTube 채널"
+            old = self._load_tokens("youtube", channel_id) or {}
             if not token.get("refresh_token"):
                 token["refresh_token"] = old.get("refresh_token")
             if not token.get("refresh_token"):
-                raise SocialError("Google에서 refresh token을 반환하지 않았습니다. 연결을 해제하고 다시 승인해 주세요.")
-            token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
-            channel_id = "youtube"
-            channel_name = "YouTube 채널"
-            try:
-                channel = request_json(
-                    "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
-                    headers={"Authorization": f"Bearer {token['access_token']}"},
-                )
-                items = channel.get("items", [])
-                if items:
-                    channel_id = str(items[0].get("id") or channel_id)
-                    channel_name = items[0].get("snippet", {}).get("title") or channel_name
-            except SocialError:
-                pass
-            self._save_provider("youtube", token, [{"id": channel_id, "name": channel_name}], channel_id, channel_name)
+                raise SocialError("Google에서 refresh token을 반환하지 않았습니다. 계정 권한을 다시 승인해 주세요.")
+            self._save_provider("youtube", {channel_id: token}, [{"id": channel_id, "name": channel_name}], channel_id)
         elif provider == "instagram":
             short = request_json(
                 "https://graph.facebook.com/v26.0/oauth/access_token", method="POST",
@@ -457,7 +694,7 @@ class SocialManager:
             )
             pages = page_result.get("data", [])
             available = []
-            page_tokens = {}
+            page_tokens: dict[str, dict[str, Any]] = {}
             for page in pages:
                 ig = page.get("instagram_business_account") if isinstance(page, dict) else None
                 if not isinstance(ig, dict) or not ig.get("id") or not page.get("access_token"):
@@ -472,11 +709,14 @@ class SocialManager:
             if not available:
                 raise SocialError("연결 가능한 Instagram 프로 계정을 찾지 못했습니다. Instagram Business/Creator 계정이 Facebook Page에 연결되어 있고, 요청한 Meta 권한이 승인되었는지 확인해 주세요.")
             chosen = available[0]
-            token_bundle = {
-                "user_access_token": access_token,
-                "pages": page_tokens,
+            token_bundles = {
+                account_id: {
+                    "user_access_token": access_token,
+                    "pages": {account_id: page_token},
+                }
+                for account_id, page_token in page_tokens.items()
             }
-            self._save_provider("instagram", token_bundle, available, chosen["id"], chosen["name"])
+            self._save_provider("instagram", token_bundles, available, chosen["id"])
         else:
             token = request_json(
                 "https://open.tiktokapis.com/v2/oauth/token/", method="POST",
@@ -505,44 +745,96 @@ class SocialManager:
                 token["open_id"] = user_data.get("open_id") or token.get("open_id")
             except (SocialError, AttributeError):
                 pass
-            account_id = str(token.get("open_id") or "tiktok")
-            self._save_provider("tiktok", token, [{"id": account_id, "name": name}], account_id, name)
-        return "연결되었습니다. 이 창을 닫고 MakeShort로 돌아가세요."
+            account_id = str(token.get("open_id") or "")
+            if not account_id:
+                raise SocialError("TikTok 계정 ID를 확인하지 못했습니다. 권한을 확인한 뒤 다시 연결해 주세요.")
+            self._save_provider("tiktok", {account_id: token}, [{"id": account_id, "name": name}], account_id)
+        return "계정을 연결했습니다. 이 창을 닫고 MakeShort로 돌아가세요."
 
     def _save_provider(
         self,
         provider: str,
-        token_bundle: dict[str, Any],
+        token_bundles: dict[str, dict[str, Any]],
         available: list[dict[str, str]],
         selected_id: str,
-        account_name: str,
     ) -> None:
-        self._set_secret(f"tokens:{provider}", json.dumps(token_bundle, ensure_ascii=False))
         with self.file_lock:
             accounts = self._read_store(self.accounts_path)
+            current = accounts.get(provider, {})
+            current_rows = self._provider_accounts(accounts, provider)
+            merged = {row["id"]: row for row in current_rows}
+            for row in available:
+                account_id = row["id"]
+                merged[account_id] = {"id": account_id, "name": row.get("name") or PROVIDERS[provider]["label"]}
+                token_bundle = token_bundles.get(account_id)
+                if isinstance(token_bundle, dict):
+                    self._set_secret(self._token_key(provider, account_id), json.dumps(token_bundle, ensure_ascii=False))
+            rows = list(merged.values())
+            selected = selected_id if selected_id in merged else (current.get("selected_id") if isinstance(current, dict) else "")
+            if not selected or selected not in merged:
+                selected = next(iter(merged), "")
             accounts[provider] = {
-                "account_id": selected_id,
-                "account_name": account_name,
-                "selected_id": selected_id,
-                "accounts": available,
+                **(current if isinstance(current, dict) else {}),
+                "account_id": selected,
+                "account_name": merged.get(selected, {}).get("name", ""),
+                "selected_id": selected,
+                "accounts": rows,
                 "updated_at": int(time.time()),
             }
+            groups = accounts.get("groups")
+            if not isinstance(groups, list) or not groups:
+                accounts["groups"] = [{
+                    "id": secrets.token_urlsafe(12),
+                    "name": "기본 그룹",
+                    "accounts": {provider: selected},
+                }]
+            elif len(groups) == 1 and isinstance(groups[0], dict) and groups[0].get("name") == "기본 그룹":
+                assigned = groups[0].setdefault("accounts", {})
+                assigned.setdefault(provider, selected)
             self._write_store(self.accounts_path, accounts)
 
-    def _load_tokens(self, provider: str) -> dict[str, Any] | None:
-        raw = self._get_secret(f"tokens:{provider}")
-        if not raw:
+    def _load_tokens(self, provider: str, account_id: str | None = None) -> dict[str, Any] | None:
+        account_id = account_id or self._selected_account_id(provider)
+        if not account_id:
             return None
+        accounts = self._read_store(self.accounts_path)
+        rows = self._provider_accounts(accounts, provider)
+        if not any(row["id"] == account_id for row in rows):
+            return None
+        raw = self._get_secret(self._token_key(provider, account_id))
+        if not raw:
+            legacy_raw = self._get_secret(f"tokens:{provider}")
+            if not legacy_raw:
+                return None
+            try:
+                legacy = json.loads(legacy_raw)
+            except json.JSONDecodeError:
+                raise SocialError("로컬 토큰 정보를 읽지 못했습니다. 플랫폼 계정을 다시 연결해 주세요.") from None
+            if not isinstance(legacy, dict):
+                return None
+            item = accounts.get(provider, {})
+            selected = item.get("selected_id") if isinstance(item, dict) else None
+            if provider == "instagram":
+                page = legacy.get("pages", {}).get(account_id) if isinstance(legacy.get("pages"), dict) else None
+                if not isinstance(page, dict):
+                    return None
+                token = {"user_access_token": legacy.get("user_access_token"), "pages": {account_id: page}}
+            elif account_id == selected or len(rows) == 1:
+                token = legacy
+            else:
+                return None
+            self._set_secret(self._token_key(provider, account_id), json.dumps(token, ensure_ascii=False))
+            return token
         try:
             token = json.loads(raw)
         except json.JSONDecodeError:
             raise SocialError("로컬 토큰 정보를 읽지 못했습니다. 플랫폼 계정을 다시 연결해 주세요.") from None
         return token if isinstance(token, dict) else None
 
-    def _store_tokens(self, provider: str, tokens: dict[str, Any]) -> None:
-        self._set_secret(f"tokens:{provider}", json.dumps(tokens, ensure_ascii=False))
+    def _store_tokens(self, provider: str, tokens: dict[str, Any], account_id: str) -> None:
+        self._set_secret(self._token_key(provider, account_id), json.dumps(tokens, ensure_ascii=False))
 
-    def _refresh_access_token(self, provider: str, tokens: dict[str, Any]) -> dict[str, Any]:
+    def _refresh_access_token(self, provider: str, tokens: dict[str, Any], account_id: str) -> dict[str, Any]:
         client_id, client_secret = self._credentials(provider)
         if provider == "youtube":
             refreshed = request_json(
@@ -574,24 +866,25 @@ class SocialManager:
         keep = {key: value for key, value in tokens.items() if key not in {"access_token", "expires_in", "expires_at"}}
         keep.update(refreshed)
         keep["expires_at"] = time.time() + int(refreshed.get("expires_in", 86400))
-        self._store_tokens(provider, keep)
+        self._store_tokens(provider, keep, account_id)
         return keep
 
-    def _access_tokens(self, provider: str) -> dict[str, Any]:
-        tokens = self._load_tokens(provider)
+    def _access_tokens(self, provider: str, account_id: str | None = None) -> dict[str, Any]:
+        account_id = account_id or self._selected_account_id(provider)
+        tokens = self._load_tokens(provider, account_id)
         if not tokens:
             raise SocialError(f"{PROVIDERS[provider]['label']} 계정을 먼저 연결해 주세요.")
         expiry = float(tokens.get("expires_at", 0) or 0)
         if expiry and expiry - time.time() < 300:
-            tokens = self._refresh_access_token(provider, tokens)
+            tokens = self._refresh_access_token(provider, tokens, str(account_id))
         return tokens
 
-    def instagram_creator_info(self) -> dict[str, Any]:
-        self._access_tokens("instagram")
+    def instagram_creator_info(self, account_id: str | None = None) -> dict[str, Any]:
+        self._access_tokens("instagram", account_id)
         return {"available": True}
 
-    def tiktok_creator_info(self) -> dict[str, Any]:
-        tokens = self._access_tokens("tiktok")
+    def tiktok_creator_info(self, account_id: str | None = None) -> dict[str, Any]:
+        tokens = self._access_tokens("tiktok", account_id)
         response = request_json(
             "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
             method="POST",
@@ -610,24 +903,42 @@ class SocialManager:
         metadata = request.get("metadata", {})
         if not isinstance(metadata, dict):
             raise SocialError("게시물 설정을 확인해 주세요.")
+        group_id = request.get("group_id")
+        group = None
+        if group_id is not None:
+            groups = self._read_store(self.accounts_path).get("groups", [])
+            group = next((item for item in groups if isinstance(item, dict) and item.get("id") == group_id), None) if isinstance(groups, list) else None
+            if group is None:
+                raise SocialError("배포할 계정 그룹을 찾지 못했습니다. 그룹을 다시 선택해 주세요.")
         if file_path.stat().st_size > SOCIAL_MAX_UPLOAD_BYTES:
             raise SocialError("배포 파일은 플랫폼 공통 제한인 1GB 이하여야 합니다.")
         info = self._inspect_video(file_path)
         results = []
+        assigned_accounts = group.get("accounts", {}) if group and isinstance(group.get("accounts"), dict) else {}
         for provider in targets:
+            account_id = assigned_accounts.get(provider) if group else self._selected_account_id(provider)
+            if not account_id:
+                results.append({
+                    "provider": provider,
+                    "ok": False,
+                    "error": f"{PROVIDERS[provider]['label']} 계정이 선택된 그룹에 없습니다.",
+                })
+                continue
+            account_rows = self._provider_accounts(self._read_store(self.accounts_path), provider)
+            account_name = next((row["name"] for row in account_rows if row["id"] == account_id), PROVIDERS[provider]["label"])
             try:
                 if provider == "youtube":
-                    result = self._publish_youtube(file_path, metadata, info)
+                    result = self._publish_youtube(file_path, metadata, info, account_id)
                 elif provider == "instagram":
-                    result = self._publish_instagram(file_path, metadata, info)
+                    result = self._publish_instagram(file_path, metadata, info, account_id)
                 else:
-                    result = self._publish_tiktok(file_path, metadata, info)
-                results.append({"provider": provider, "ok": True, **result})
+                    result = self._publish_tiktok(file_path, metadata, info, account_id)
+                results.append({"provider": provider, "account_id": account_id, "account_name": account_name, "ok": True, **result})
             except SocialError as exc:
-                results.append({"provider": provider, "ok": False, "error": str(exc)})
+                results.append({"provider": provider, "account_id": account_id, "account_name": account_name, "ok": False, "error": str(exc)})
             except Exception:
                 logger.exception("Unexpected error publishing to %s", provider)
-                results.append({"provider": provider, "ok": False, "error": "게시 중 예상하지 못한 오류가 발생했습니다. 앱 로그를 확인해 주세요."})
+                results.append({"provider": provider, "account_id": account_id, "account_name": account_name, "ok": False, "error": "게시 중 예상하지 못한 오류가 발생했습니다. 앱 로그를 확인해 주세요."})
         return {"results": results}
 
     def _inspect_video(self, file_path: Path) -> dict[str, float | int]:
@@ -649,7 +960,7 @@ class SocialManager:
             raise SocialError("배포할 영상의 해상도와 길이를 확인해 주세요.")
         return {"width": width, "height": height, "duration": duration}
 
-    def _publish_youtube(self, file_path: Path, metadata: dict[str, Any], info: dict[str, Any]) -> dict[str, Any]:
+    def _publish_youtube(self, file_path: Path, metadata: dict[str, Any], info: dict[str, Any], account_id: str) -> dict[str, Any]:
         if info["duration"] > 180 or info["height"] < info["width"]:
             raise SocialError("YouTube Shorts는 세로 또는 정사각형 영상이며 3분 이하여야 합니다.")
         title = metadata.get("youtube_title") or metadata.get("title") or file_path.stem
@@ -661,7 +972,7 @@ class SocialManager:
             raise SocialError("YouTube 설명은 5,000자 이하여야 합니다.")
         if privacy not in {"private", "unlisted", "public"}:
             raise SocialError("YouTube 공개 범위를 확인해 주세요.")
-        tokens = self._access_tokens("youtube")
+        tokens = self._access_tokens("youtube", account_id)
         size = file_path.stat().st_size
         video = {
             "snippet": {
@@ -720,12 +1031,11 @@ class SocialManager:
             raise SocialError("YouTube가 게시물 ID를 반환하지 않았습니다.")
         return {"account": "YouTube", "id": video_id, "url": f"https://www.youtube.com/watch?v={video_id}"}
 
-    def _publish_instagram(self, file_path: Path, metadata: dict[str, Any], info: dict[str, Any]) -> dict[str, Any]:
+    def _publish_instagram(self, file_path: Path, metadata: dict[str, Any], info: dict[str, Any], account_id: str) -> dict[str, Any]:
         if info["duration"] < 3 or info["duration"] > 900:
             raise SocialError("Instagram Reels 영상 길이는 3초~15분이어야 합니다.")
-        tokens = self._access_tokens("instagram")
-        account_store = self._read_store(self.accounts_path).get("instagram", {})
-        ig_id = account_store.get("selected_id") or account_store.get("account_id")
+        tokens = self._access_tokens("instagram", account_id)
+        ig_id = account_id
         page = tokens.get("pages", {}).get(str(ig_id), {})
         page_token = page.get("access_token")
         if not ig_id or not page_token:
@@ -802,10 +1112,10 @@ class SocialManager:
             pass
         return {"account": "Instagram", "id": media_id, "url": url}
 
-    def _publish_tiktok(self, file_path: Path, metadata: dict[str, Any], info: dict[str, Any]) -> dict[str, Any]:
-        tokens = self._access_tokens("tiktok")
+    def _publish_tiktok(self, file_path: Path, metadata: dict[str, Any], info: dict[str, Any], account_id: str) -> dict[str, Any]:
+        tokens = self._access_tokens("tiktok", account_id)
         token = tokens["access_token"]
-        creator = self.tiktok_creator_info()
+        creator = self.tiktok_creator_info(account_id)
         max_duration = int(creator.get("max_video_post_duration_sec", 0) or 0)
         if max_duration and info["duration"] > max_duration:
             raise SocialError(f"이 TikTok 계정의 동영상 제한은 {max_duration}초입니다.")

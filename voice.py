@@ -26,6 +26,29 @@ VOICE_GENDERS = {
     "female": {"label": "여성", "speaker": "Sohee"},
 }
 
+VOICE_AGE_GROUPS = {
+    "child": {
+        "label": "어린이",
+        "instruction": "Use a natural childlike voice impression with a light, youthful quality and higher pitch; avoid cartoonish exaggeration.",
+    },
+    "teen": {
+        "label": "청소년",
+        "instruction": "Use a natural teenage voice impression with youthful resonance and clear, energetic articulation.",
+    },
+    "young_adult": {
+        "label": "청년",
+        "instruction": "Use a natural young adult voice impression with a fresh, balanced resonance and clear articulation.",
+    },
+    "middle_aged": {
+        "label": "중년",
+        "instruction": "Use a natural middle-aged adult voice impression with a mature, steady, well-grounded resonance.",
+    },
+    "senior": {
+        "label": "노인",
+        "instruction": "Use a natural older adult voice impression with a mature, gently softened quality; keep it clear and respectful.",
+    },
+}
+
 VOICE_LANGUAGES = {"Korean", "English"}
 
 VOICE_TONES = {
@@ -158,10 +181,11 @@ class VoiceManager:
         }
 
     @staticmethod
-    def describe(gender: str, tone: str) -> str:
+    def describe(gender: str, tone: str, age_group: str = "young_adult") -> str:
         gender_label = VOICE_GENDERS[gender]["label"]
+        age_label = VOICE_AGE_GROUPS[age_group]["label"]
         tone_label = VOICE_TONES[tone]["label"]
-        return f"Qwen3-TTS · {gender_label} · {tone_label}"
+        return f"Qwen3-TTS · {gender_label} · {age_label} · {tone_label}"
 
     def unavailable_message(self) -> str:
         if not PLATFORM_SUPPORTED:
@@ -207,11 +231,14 @@ class VoiceManager:
         speed: float,
         output_path: Path,
         language: str = "Korean",
+        age_group: str = "young_adult",
     ) -> None:
         if not isinstance(text, str) or not text.strip() or len(text) > 20_000:
             raise VoiceError("읽을 문장은 1~20,000자여야 합니다.")
         if not isinstance(gender, str) or gender not in VOICE_GENDERS:
             raise VoiceError("남성 또는 여성 음성을 선택해 주세요.")
+        if not isinstance(age_group, str) or age_group not in VOICE_AGE_GROUPS:
+            raise VoiceError("음성 연령대를 선택해 주세요.")
         if not isinstance(tone, str) or tone not in VOICE_TONES:
             raise VoiceError("음성 어투 프리셋을 선택해 주세요.")
         if not isinstance(language, str) or language not in VOICE_LANGUAGES:
@@ -220,6 +247,7 @@ class VoiceManager:
             raise VoiceError("읽기 속도는 0.7~1.3 범위에서 선택해 주세요.")
 
         instruction = " ".join((
+            VOICE_AGE_GROUPS[age_group]["instruction"],
             VOICE_TONES[tone]["instruction"],
             f"Aim for a speaking pace of about {float(speed):.2f}x normal speed.",
         ))
