@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -45,7 +46,7 @@ OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
 DEFAULT_FPS = 30
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(threadName)s] %(message)s")
 logger = logging.getLogger("makeshort")
 
 
@@ -369,6 +370,7 @@ def render_video_with_remotion(
     props_path: Path,
     props: dict[str, object],
     server_port: int,
+    request_id: str | None = None,
 ) -> None:
     remotion_cli = ROOT / "node_modules" / ".bin" / "remotion"
     if not remotion_cli.exists():
@@ -406,27 +408,54 @@ def render_video_with_remotion(
             "--duration", str(props["durationInFrames"]), "--codec", "h264", "--crf", "18",
             "--concurrency", "2",
         ]
-        logger.info("Rendering Remotion composition with %s", "video source" if source_path is not None else "overlay layers only")
+        log_prefix = f"render[{request_id}] " if request_id else ""
+        render_started_at = time.monotonic()
+        logger.info(
+            "%sRemotion process started source=%s duration_frames=%s fps=%s",
+            log_prefix,
+            "video" if source_path is not None else "none",
+            props["durationInFrames"],
+            props["fps"],
+        )
         result = subprocess.run(
             command, cwd=ROOT, capture_output=True, text=True, timeout=7200,
         )
         if result.returncode != 0:
-            logger.error("Remotion render failed: %s", result.stderr[-6000:])
+            logger.error(
+                "%sRemotion process failed exit_code=%d elapsed_ms=%d stderr_tail=%s",
+                log_prefix,
+                result.returncode,
+                round((time.monotonic() - render_started_at) * 1000),
+                result.stderr[-6000:],
+            )
             raise RuntimeError("Remotion render failed")
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise RuntimeError("Remotion completed without an output file")
+        logger.info(
+            "%sRemotion process completed output_bytes=%d elapsed_ms=%d",
+            log_prefix,
+            output_path.stat().st_size,
+            round((time.monotonic() - render_started_at) * 1000),
+        )
     finally:
         with MEDIA_FILES_LOCK:
             for media_key in render_media_keys:
                 MEDIA_FILES.pop(media_key, None)
 
 
-def send_json(handler: BaseHTTPRequestHandler, status: int, payload: object) -> None:
+def send_json(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    payload: object,
+    request_id: str | None = None,
+) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "no-store")
+    if request_id:
+        handler.send_header("X-Makeshort-Request-Id", request_id)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -1037,34 +1066,74 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                         audio_path.unlink(missing_ok=True)
 
     def render_composite(self) -> None:
+        request_id = uuid.uuid4().hex[:12]
+        started_at = time.monotonic()
+        content_length_header = self.headers.get("Content-Length", "0")
+        content_type = self.headers.get("Content-Type", "")[:120]
+        encoded_props = self.headers.get("X-Makeshort-Props", "")
+        logger.info(
+            "render[%s] request started client=%s content_length=%r content_type=%r props_header_bytes=%d",
+            request_id,
+            self.address_string(),
+            content_length_header[:40],
+            content_type,
+            len(encoded_props),
+        )
+
+        def reject(status: int, stage: str, message: str) -> None:
+            logger.warning(
+                "render[%s] rejected status=%d stage=%s reason=%s elapsed_ms=%d",
+                request_id,
+                status,
+                stage,
+                message,
+                round((time.monotonic() - started_at) * 1000),
+            )
+            send_json(self, status, {"error": message}, request_id=request_id)
+
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            length = int(content_length_header)
         except ValueError:
-            send_json(self, 400, {"error": "업로드한 영상 크기를 확인해 주세요."})
+            reject(400, "content_length", "업로드한 영상 크기를 확인해 주세요.")
             return
         if length < 0 or length > 1_000_000_000:
-            send_json(self, 413, {"error": "영상 파일이 1GB를 초과합니다."})
+            reject(413, "content_length", "영상 파일이 1GB를 초과합니다.")
             return
 
-        encoded_props = self.headers.get("X-Makeshort-Props", "")
         if len(encoded_props) > 96_000:
-            send_json(self, 413, {"error": "텍스트 설정이 너무 큽니다."})
+            reject(413, "props_size", "텍스트 설정이 너무 큽니다.")
             return
         try:
             raw_props = base64.urlsafe_b64decode(encoded_props.encode("ascii"))
             props = json.loads(raw_props)
-            props = validate_render_props(props)
         except (ValueError, UnicodeEncodeError, json.JSONDecodeError, RequestError) as exc:
-            message = str(exc) if isinstance(exc, RequestError) else "텍스트 설정을 확인해 주세요."
-            send_json(self, 400, {"error": message})
+            reject(400, "props_decode", "텍스트 설정을 확인해 주세요.")
+            logger.debug("render[%s] props decode detail: %s", request_id, exc)
             return
+        try:
+            props = validate_render_props(props)
+        except RequestError as exc:
+            reject(400, "props_validation", str(exc))
+            return
+
+        logger.info(
+            "render[%s] request validated video_bytes=%d fps=%s duration_frames=%s captions=%d images=%d voiceovers=%d",
+            request_id,
+            length,
+            props["fps"],
+            props["durationInFrames"],
+            len(props["captions"]),
+            len(props["images"]),
+            len(props["voiceovers"]),
+        )
 
         remotion_cli = ROOT / "node_modules" / ".bin" / "remotion"
         if not remotion_cli.exists():
-            send_json(self, 503, {"error": "Remotion 설치가 필요합니다. README의 npm 설치 명령을 실행해 주세요."})
+            reject(503, "remotion_setup", "Remotion 설치가 필요합니다. README의 npm 설치 명령을 실행해 주세요.")
             return
 
         response_started = False
+        stage = "upload"
         try:
             with tempfile.TemporaryDirectory(prefix="makeshort-render-") as temp_dir:
                 temp_root = Path(temp_dir)
@@ -1081,30 +1150,59 @@ class MakeShortHandler(BaseHTTPRequestHandler):
                             video_file.write(chunk)
                             remaining -= len(chunk)
 
+                stage = "remotion_render"
+                logger.info("render[%s] Remotion render started", request_id)
                 render_video_with_remotion(
                     input_path if length else None,
                     output_path,
                     props_path,
                     props,
                     self.server.server_port,
+                    request_id=request_id,
                 )
 
+                stage = "response_write"
+                output_size = output_path.stat().st_size
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp4")
-                self.send_header("Content-Length", str(output_path.stat().st_size))
+                self.send_header("Content-Length", str(output_size))
                 self.send_header("Content-Disposition", 'attachment; filename="makeshort_captioned_clip.mp4"')
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Makeshort-Request-Id", request_id)
                 self.end_headers()
                 response_started = True
                 with output_path.open("rb") as output_file:
                     shutil.copyfileobj(output_file, self.wfile, length=1024 * 1024)
+                logger.info(
+                    "render[%s] completed status=200 output_bytes=%d elapsed_ms=%d",
+                    request_id,
+                    output_size,
+                    round((time.monotonic() - started_at) * 1000),
+                )
         except RequestError as exc:
             if not response_started:
-                send_json(self, 400, {"error": str(exc)})
+                reject(400, stage, str(exc))
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning(
+                "render[%s] client disconnected stage=%s elapsed_ms=%d",
+                request_id,
+                stage,
+                round((time.monotonic() - started_at) * 1000),
+            )
         except Exception:
-            logger.exception("Remotion composition failed")
+            logger.exception(
+                "render[%s] failed stage=%s elapsed_ms=%d",
+                request_id,
+                stage,
+                round((time.monotonic() - started_at) * 1000),
+            )
             if not response_started:
-                send_json(self, 500, {"error": "미디어를 합성하는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."})
+                send_json(
+                    self,
+                    500,
+                    {"error": "미디어를 합성하는 중 문제가 생겼습니다. 서버 로그를 확인해 주세요."},
+                    request_id=request_id,
+                )
 
     def _upload_project_image(self) -> None:
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -1222,8 +1320,11 @@ def validate_render_props(props: object) -> dict[str, object]:
             raise RequestError("텍스트 레이어 설정을 확인해 주세요.")
         caption_id = caption.get("id")
         text = caption.get("text")
+        voiceover_id = caption.get("voiceoverId")
         if not isinstance(caption_id, str) or not CAPTION_ID.fullmatch(caption_id):
             raise RequestError("텍스트 레이어 ID를 확인해 주세요.")
+        if voiceover_id is not None and (not isinstance(voiceover_id, str) or not CAPTION_ID.fullmatch(voiceover_id)):
+            raise RequestError("자막에 연결된 AI 음성 ID를 확인해 주세요.")
         if not isinstance(text, str) or not text.strip() or len(text) > 500:
             raise RequestError("텍스트는 1~500자까지 입력할 수 있습니다.")
         try:
@@ -1276,6 +1377,7 @@ def validate_render_props(props: object) -> dict[str, object]:
             "color": color,
             "animation": animation,
             "decoration": decoration,
+            "voiceoverId": voiceover_id,
         })
     for image in images:
         if not isinstance(image, dict):
@@ -1306,8 +1408,11 @@ def validate_render_props(props: object) -> dict[str, object]:
             raise RequestError("AI 음성 레이어 설정을 확인해 주세요.")
         voiceover_id = voiceover.get("id")
         asset_key = voiceover.get("assetKey")
+        caption_enabled = voiceover.get("captionEnabled", True)
         if not isinstance(voiceover_id, str) or not CAPTION_ID.fullmatch(voiceover_id):
             raise RequestError("AI 음성 레이어 ID를 확인해 주세요.")
+        if not isinstance(caption_enabled, bool):
+            raise RequestError("AI 음성 자막 표시 설정을 확인해 주세요.")
         if not isinstance(asset_key, str) or not re.fullmatch(r"[a-f0-9]{32}", asset_key):
             raise RequestError("생성된 음성을 다시 만들어 주세요.")
         try:
@@ -1337,7 +1442,11 @@ def validate_render_props(props: object) -> dict[str, object]:
             "start": start,
             "duration": audio_duration,
             "volume": volume,
+            "captionEnabled": caption_enabled,
         })
+    voiceover_ids = {voiceover["id"] for voiceover in checked_voiceovers}
+    if any(caption["voiceoverId"] is not None and caption["voiceoverId"] not in voiceover_ids for caption in checked):
+        raise RequestError("자막과 연결된 AI 음성 레이어를 찾을 수 없습니다.")
     return {
         "fps": frame_rate,
         "durationInFrames": duration_frames,

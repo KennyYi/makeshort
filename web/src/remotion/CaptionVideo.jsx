@@ -128,6 +128,11 @@ const Caption = ({ caption, selectedId, onPointerDown, onPointerMove, onPointerU
 
 export const CaptionVideo = ({ src, sourceVolume = 1, duckSourceDuringVoiceover = true, captions = [], images = [], voiceovers = [], selectedId = null, onCaptionPointerDown, onCaptionPointerMove, onCaptionPointerUp }) => {
   const { fps, durationInFrames } = useVideoConfig();
+  const visibleCaptions = captions.filter((caption) => {
+    if (!caption.voiceoverId) return true;
+    const voiceover = voiceovers.find((item) => item.id === caption.voiceoverId);
+    return voiceover?.captionEnabled !== false;
+  });
   return (
     <AbsoluteFill style={{ backgroundColor: "#000", overflow: "hidden" }}>
       {src ? <OffthreadVideo src={src} volume={(frame) => sourceVolume * getSourceVolumeAtFrame(frame, fps, voiceovers, duckSourceDuringVoiceover)} style={{ width: "100%", height: "100%", objectFit: "fill" }} /> : null}
@@ -150,7 +155,7 @@ export const CaptionVideo = ({ src, sourceVolume = 1, duckSourceDuringVoiceover 
           </Sequence>
         );
       })}
-      {captions.map((caption) => {
+      {visibleCaptions.map((caption) => {
         const from = Math.max(0, Math.round(caption.start * fps));
         const end = Math.min(durationInFrames, Math.round(caption.end * fps));
         const duration = Math.max(1, end - from);

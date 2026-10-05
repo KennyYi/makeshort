@@ -24,7 +24,10 @@ from urllib.request import Request, urlopen
 
 GRAPH_VERSION = "v26.0"
 GRAPH_ROOT = f"https://graph.facebook.com/{GRAPH_VERSION}"
-YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+YOUTUBE_SCOPES = (
+    "https://www.googleapis.com/auth/youtube.upload "
+    "https://www.googleapis.com/auth/youtube.readonly"
+)
 TIKTOK_SCOPES = "user.info.basic,video.publish"
 SOCIAL_MAX_UPLOAD_BYTES = 1_000_000_000
 GOOGLE_CHUNK_BYTES = 8 * 1024 * 1024
@@ -586,7 +589,7 @@ class SocialManager:
                 "client_id": client_id,
                 "redirect_uri": redirect_uri,
                 "response_type": "code",
-                "scope": YOUTUBE_SCOPE,
+                "scope": YOUTUBE_SCOPES,
                 "access_type": "offline",
                 "prompt": "select_account consent",
                 "include_granted_scopes": "true",

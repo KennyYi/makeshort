@@ -68,6 +68,26 @@ def synthesize(model, request: dict) -> None:
             raise RuntimeError("Qwen3-TTS가 유효한 모노 오디오를 만들지 못했습니다.")
         if not isinstance(sample_rate, (int, np.integer)) or sample_rate <= 0:
             raise RuntimeError("Qwen3-TTS 오디오 샘플레이트를 확인할 수 없습니다.")
+
+        # Keep naturally quiet deliveries such as whispers intelligible while
+        # preserving their timbre. Measure only active 20 ms frames so leading
+        # or trailing silence does not suppress the gain, and leave headroom.
+        frame_size = max(1, round(int(sample_rate) * 0.02))
+        frame_count = (audio.size + frame_size - 1) // frame_size
+        padded = np.pad(audio, (0, frame_count * frame_size - audio.size))
+        frames = padded.reshape(frame_count, frame_size)
+        frame_rms = np.sqrt(np.mean(np.square(frames), axis=1))
+        peak_frame_rms = float(np.max(frame_rms))
+        if peak_frame_rms > 1e-8:
+            active_frames = frames[frame_rms >= peak_frame_rms * 0.1]
+            active_rms = float(np.sqrt(np.mean(np.square(active_frames))))
+            peak = float(np.max(np.abs(audio)))
+            if active_rms > 1e-8 and peak > 1e-8:
+                target_rms = 10 ** (-20 / 20)
+                peak_ceiling = 10 ** (-1.5 / 20)
+                gain = min(target_rms / active_rms, peak_ceiling / peak)
+                audio = audio * gain
+
         sf.write(str(temporary), audio, int(sample_rate), format="WAV", subtype="PCM_16")
         os.replace(temporary, output_path)
     finally:

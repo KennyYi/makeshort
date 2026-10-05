@@ -40,7 +40,7 @@ Open <http://127.0.0.1:8000>.
 - Start with a blank 9:16 timeline and add text, images, MP4/MOV files, or an optional YouTube clip.
 - Choose whether to fill the frame and crop the sides (`fill`), or fit the full video with black bars (`fit`).
 - In the Remotion preview, edit caption text, timing, position, box size, font, color, animation, and effects. Drag captions to fine-tune their position, or choose a style preset.
-- Generate AI voiceovers only for selected lines in a script. Choose a male or female voice, an age range, one of eight delivery styles, and a speaking speed; then edit voice clips on the timeline.
+- Generate AI voiceovers only for selected lines in a script. Choose a male or female voice, an age range, one of eight delivery styles, and a speaking speed; then edit voice clips on the timeline. Each generated voice clip gets a matching caption whose timing follows the clip; turn captions on or off per voice clip.
 - Export H.264 MP4 at 1080 × 1920. YouTube clips retain the source frame rate.
 
 ### Qwen voice model

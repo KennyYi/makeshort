@@ -326,8 +326,14 @@ input::placeholder { color: #b4b5ae; }
 .image-inspector-preview img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
 .image-fit-control { margin-top: 10px; }
 .voice-layer-number { color: #a26080; font-size: 13px; }
+.voice-caption-status { flex: 0 0 auto; color: #78952f; font-size: 7px; }
+.voice-caption-status.off { color: #a0a197; }
 .voiceover-controls { margin-top: 11px; }
 .voiceover-text-preview { margin: 7px 0; color: #686a60; font-size: 9px; line-height: 1.5; }
+.linked-caption-note { margin: 6px 0; color: #888a80; font-size: 8px; line-height: 1.45; }
+.voiceover-caption-toggle { display: grid; grid-template-columns: 14px 1fr; align-items: center; gap: 3px 6px; margin: 8px 0; color: #686a60; font-size: 9px; }
+.voiceover-caption-toggle input { grid-row: span 2; margin: 0; accent-color: #91ab35; }
+.voiceover-caption-toggle small { color: #92948a; font-size: 7px; }
 .voiceover-audio-preview { display: block; width: 100%; height: 30px; }
 .voiceover-start-input { width: 100%; height: 31px; padding: 0 8px; border: 1px solid #e6e7e0; border-radius: 6px; color: #42443b; background: #fff; font-size: 10px; }
 .voiceover-volume { display: grid; grid-template-columns: 30px 1fr 33px; align-items: center; gap: 7px; margin-top: 9px; color: #77796f; font-size: 8px; }
@@ -403,6 +409,9 @@ input::placeholder { color: #b4b5ae; }
 .image-lane { background: repeating-linear-gradient(90deg, transparent, transparent calc(14.285% - 1px), #f0f0eb calc(14.285% - 1px), #f0f0eb 14.285%); }
 .timeline-caption, .timeline-image, .timeline-voice { position: absolute; top: 9px; height: 24px; min-width: 22px; display: flex; align-items: center; overflow: hidden; border-radius: 5px; cursor: grab; touch-action: none; user-select: none; }
 .timeline-caption { border: 1px solid #a7c340; color: #3f4b1b; background: #d9ec91; }
+.timeline-caption.linked { border-style: dashed; cursor: default; }
+.timeline-caption.linked:active { cursor: default; }
+.timeline-caption.muted { opacity: .42; }
 .timeline-caption:active { cursor: grabbing; }
 .timeline-caption.selected { z-index: 1; border-color: #8ba92b; background: #cce477; box-shadow: 0 0 0 2px rgba(169,200,58,.2); }
 .timeline-image { border: 1px solid #72a9b2; color: #355f66; background: #c7e8ec; }

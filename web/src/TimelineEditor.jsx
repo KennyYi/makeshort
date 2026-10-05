@@ -32,6 +32,14 @@ const createCaption = (duration, start = 0) => ({
   decoration: "shadow",
 });
 
+const createVoiceCaption = (text, start, end, voiceoverId) => ({
+  ...createCaption(end, start),
+  text,
+  start,
+  end,
+  voiceoverId,
+});
+
 const STYLE_PRESETS = [
   { id: "classic", label: t("기본"), sample: t("가나다"), font: "noto", fontSize: 72, color: "#ffffff", animation: "fade", decoration: "shadow" },
   { id: "impact", label: t("임팩트"), sample: t("강조!"), font: "black-han", fontSize: 104, color: "#ffe45c", animation: "pop", decoration: "outline" },
@@ -64,6 +72,24 @@ const VOICE_TONES = [
 ];
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const clampCaptionPosition = (caption) => {
+  const position = POSITION_DETAILS[caption.position] ?? POSITION_DETAILS["bottom-center"];
+  const boxWidth = caption.boxWidth ?? 84;
+  const boxHeight = caption.boxHeight ?? 10;
+  return {
+    ...caption,
+    positionX: clamp(
+      caption.positionX ?? position.x,
+      position.anchorX * boxWidth,
+      100 - (1 - position.anchorX) * boxWidth,
+    ),
+    positionY: clamp(
+      caption.positionY ?? position.y,
+      position.anchorY * boxHeight,
+      100 - (1 - position.anchorY) * boxHeight,
+    ),
+  };
+};
 const formatTime = (seconds) => {
   const safe = Math.max(0, seconds);
   const minutes = Math.floor(safe / 60);
@@ -246,19 +272,24 @@ export const TimelineEditor = () => {
       if (!board) return;
       const boardWidth = Math.max(1, board.getBoundingClientRect().width - 98);
       const delta = ((event.clientX - drag.pointerX) / boardWidth) * duration;
-      const updateLayers = drag.kind === "image" ? setImages : drag.kind === "voice" ? setVoiceovers : setCaptions;
-      updateLayers((current) => current.map((layer) => {
-        if (layer.id !== drag.id) return layer;
+      if (drag.kind === "voice") {
         const span = drag.end - drag.start;
-        if (drag.mode === "move") {
-          const start = clamp(drag.start + delta, 0, Math.max(0, duration - span));
-          return { ...layer, start, end: start + span };
-        }
-        if (drag.mode === "start") {
-          return { ...layer, start: clamp(drag.start + delta, 0, drag.end - 0.1) };
-        }
-        return { ...layer, end: clamp(drag.end + delta, drag.start + 0.1, duration) };
-      }));
+        updateVoiceoverStart(drag.id, drag.start + delta, span);
+      } else {
+        const updateLayers = drag.kind === "image" ? setImages : setCaptions;
+        updateLayers((current) => current.map((layer) => {
+          if (layer.id !== drag.id) return layer;
+          const span = drag.end - drag.start;
+          if (drag.mode === "move") {
+            const start = clamp(drag.start + delta, 0, Math.max(0, duration - span));
+            return { ...layer, start, end: start + span };
+          }
+          if (drag.mode === "start") {
+            return { ...layer, start: clamp(drag.start + delta, 0, drag.end - 0.1) };
+          }
+          return { ...layer, end: clamp(drag.end + delta, drag.start + 0.1, duration) };
+        }));
+      }
       clearRendered();
     };
     const finish = () => { dragRef.current = null; };
@@ -280,9 +311,29 @@ export const TimelineEditor = () => {
     setRenderedBlob(null);
   };
 
+  const updateVoiceoverStart = (voiceoverId, requestedStart, voiceDuration) => {
+    const start = clamp(requestedStart, 0, Math.max(0, duration - voiceDuration));
+    setVoiceovers((current) => current.map((voiceover) => voiceover.id === voiceoverId
+      ? { ...voiceover, start }
+      : voiceover));
+    setCaptions((current) => current.map((caption) => caption.voiceoverId === voiceoverId
+      ? { ...caption, start, end: start + voiceDuration }
+      : caption));
+    clearRendered();
+  };
+
+  const updateVoiceoverCaptionEnabled = (voiceoverId, enabled) => {
+    setVoiceovers((current) => current.map((voiceover) => voiceover.id === voiceoverId
+      ? { ...voiceover, captionEnabled: enabled }
+      : voiceover));
+    clearRendered();
+  };
+
   const updateCaption = (patch) => {
     if (!selectedId) return;
-    setCaptions((current) => current.map((caption) => caption.id === selectedId ? { ...caption, ...patch } : caption));
+    setCaptions((current) => current.map((caption) => caption.id === selectedId
+      ? clampCaptionPosition({ ...caption, ...patch })
+      : caption));
     clearRendered();
   };
 
@@ -365,9 +416,11 @@ export const TimelineEditor = () => {
     if (!selectedVoiceover) return;
     deleteProjectAsset(selectedVoiceover.assetKey);
     setVoiceovers((current) => current.filter((voiceover) => voiceover.id !== selectedVoiceover.id));
+    setCaptions((current) => current.filter((caption) => caption.voiceoverId !== selectedVoiceover.id));
     setScriptSegments((current) => current.map((segment) => segment.voiceoverId === selectedVoiceover.id
       ? { ...segment, voiceoverId: null }
       : segment));
+    setSelectedId(null);
     setSelectedVoiceoverId(null);
     clearRendered();
   };
@@ -418,6 +471,18 @@ export const TimelineEditor = () => {
       setError(t("AI 음성 레이어는 프로젝트당 최대 50개까지 만들 수 있습니다."));
       return;
     }
+    if (selectedSegments.some((segment) => segment.text.length > 500)) {
+      setError(t("음성 자막은 500자까지 가능합니다. 긴 문장은 나눠 주세요."));
+      return;
+    }
+    const captionsToCreate = selectedSegments.filter((segment) => {
+      const existingVoice = voiceovers.find((voiceover) => voiceover.segmentId === segment.id);
+      return !existingVoice || !captions.some((caption) => caption.voiceoverId === existingVoice.id);
+    }).length;
+    if (captions.length + captionsToCreate > 120) {
+      setError(t("텍스트 레이어는 최대 120개까지 사용할 수 있습니다."));
+      return;
+    }
     setGeneratingVoice(true);
     setError("");
     let cursor = currentFrame / frameRate;
@@ -447,7 +512,19 @@ export const TimelineEditor = () => {
           start,
           duration: Number(result.duration),
           volume: 1,
+          captionEnabled: previous?.captionEnabled !== false,
         };
+        setCaptions((current) => {
+          const linkedCaption = previous
+            ? current.find((caption) => caption.voiceoverId === previous.id)
+            : null;
+          if (linkedCaption) {
+            return current.map((caption) => caption.id === linkedCaption.id
+              ? { ...caption, voiceoverId: voiceover.id, text: segment.text, start, end }
+              : caption);
+          }
+          return [...current, createVoiceCaption(segment.text, start, end, voiceover.id)];
+        });
         if (previous) deleteProjectAsset(previous.assetKey);
         setVoiceovers((current) => [...current.filter((item) => item.segmentId !== segment.id), voiceover]);
         setScriptSegments((current) => current.map((item) => item.id === segment.id
@@ -723,16 +800,21 @@ export const TimelineEditor = () => {
     }
     setRendering(true);
     try {
+      const captionsToRender = captions.filter((caption) => {
+        if (!caption.voiceoverId) return true;
+        const linkedVoiceover = voiceovers.find((voiceover) => voiceover.id === caption.voiceoverId);
+        return linkedVoiceover?.captionEnabled !== false;
+      });
       const props = {
         fps: frameRate,
         durationInFrames,
         sourceVolume,
         duckSourceDuringVoiceover,
-        captions: captions.map(({ id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration }) => ({
-          id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration,
+        captions: captionsToRender.map(({ id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration, voiceoverId }) => ({
+          id, text, start, end, boxWidth, boxHeight, position, positionX, positionY, font, fontSize, color, animation, decoration, voiceoverId,
         })),
         images: images.map(({ id, assetKey, start, end, fit }) => ({ id, assetKey, start, end, fit })),
-        voiceovers: voiceovers.map(({ id, assetKey, start, duration, volume }) => ({ id, assetKey, start, duration, volume })),
+        voiceovers: voiceovers.map(({ id, assetKey, start, duration, volume, captionEnabled }) => ({ id, assetKey, start, duration, volume, captionEnabled })),
       };
       const response = await fetch("/api/render", {
         method: "POST",
@@ -743,8 +825,17 @@ export const TimelineEditor = () => {
         body: clip ?? new Blob([], { type: "video/mp4" }),
       });
       if (!response.ok) {
-        const result = await response.json().catch(() => ({}));
-        throw new Error(t(result.error || "Remotion 합성에 실패했습니다."));
+        const responseText = await response.text();
+        let result = null;
+        try {
+          result = JSON.parse(responseText);
+        } catch {
+          // Show non-JSON server responses below so HTTP failures are diagnosable.
+        }
+        const responseDetail = typeof result?.error === "string" && result.error.trim()
+          ? result.error
+          : responseText.trim() || `HTTP ${response.status} ${response.statusText} (${response.headers.get("Content-Type") || "응답 본문 없음"})`;
+        throw new Error(t(responseDetail));
       }
       const output = await response.blob();
       const outputUrl = URL.createObjectURL(output);
@@ -969,6 +1060,7 @@ export const TimelineEditor = () => {
             <div className="caption-controls">
               <div className="inspector-section-title"><span>{t("텍스트 내용")}</span><button type="button" className="delete-layer" onClick={deleteSelected}>{t("삭제")}</button></div>
               <textarea aria-label={t("텍스트 내용")} rows="2" maxLength="500" value={selectedCaption.text} onChange={(event) => updateCaption({ text: event.target.value })} />
+              {selectedCaption.voiceoverId && <p className="linked-caption-note">{t("AI 음성 길이와 위치에 연결된 자막입니다.")}</p>}
 
               <div className="inspector-label-row preset-heading"><span className="inspector-label">{t("스타일 프리셋")}</span><span className="inspector-unit">{t("크기 · 색상 · 효과")}</span></div>
               <div className="style-presets" role="group" aria-label={t("텍스트 스타일 프리셋")}>
@@ -986,9 +1078,9 @@ export const TimelineEditor = () => {
 
               <div className="inspector-label-row"><span className="inspector-label">{t("노출 시간")}</span><span className="inspector-unit">{t("초")}</span></div>
               <div className="caption-time-inputs">
-                <label><small>START</small><input type="number" min="0" max={duration} step="0.1" value={selectedCaption.start.toFixed(1)} onChange={(event) => updateTime("start", event.target.value)} /></label>
+                <label><small>START</small><input type="number" min="0" max={duration} step="0.1" disabled={Boolean(selectedCaption.voiceoverId)} value={selectedCaption.start.toFixed(1)} onChange={(event) => updateTime("start", event.target.value)} /></label>
                 <span>—</span>
-                <label><small>END</small><input type="number" min="0" max={duration} step="0.1" value={selectedCaption.end.toFixed(1)} onChange={(event) => updateTime("end", event.target.value)} /></label>
+                <label><small>END</small><input type="number" min="0" max={duration} step="0.1" disabled={Boolean(selectedCaption.voiceoverId)} value={selectedCaption.end.toFixed(1)} onChange={(event) => updateTime("end", event.target.value)} /></label>
               </div>
 
               <div className="inspector-label-row"><span className="inspector-label">{t("위치 기준점")}</span><span className="inspector-unit">{t("화면에서 드래그 가능")}</span></div>
@@ -1056,12 +1148,12 @@ export const TimelineEditor = () => {
               <button type="button" className="small-add-button" onClick={() => setVoicePanelOpen(true)}>{t("＋ 대본")}</button>
             </div>
             {voiceovers.length === 0 ? (
-              <button type="button" className="empty-layer voice-empty-layer" onClick={() => setVoicePanelOpen(true)}><span>＋</span><strong>{t("선택한 문장으로 음성을 만드세요")}</strong><small>{t("생성한 음성은 타임라인에 자동 배치됩니다.")}</small></button>
+              <button type="button" className="empty-layer voice-empty-layer" onClick={() => setVoicePanelOpen(true)}><span>＋</span><strong>{t("선택한 문장으로 음성을 만드세요")}</strong><small>{t("생성한 음성과 자막은 타임라인에 자동 배치됩니다.")}</small></button>
             ) : (
               <div className="layer-list">
                 {voiceovers.map((voiceover, index) => (
                   <button type="button" key={voiceover.id} className={`layer-row ${selectedVoiceoverId === voiceover.id ? "active" : ""}`} onClick={() => selectVoiceover(voiceover)}>
-                    <span className="layer-number voice-layer-number">♫</span><span className="layer-row-text">{voiceover.text}</span><span className="layer-row-time">{formatTime(voiceover.start)}</span>
+                    <span className="layer-number voice-layer-number">♫</span><span className="layer-row-text">{voiceover.text}</span><span className={`voice-caption-status ${voiceover.captionEnabled === false ? "off" : ""}`}>{t(voiceover.captionEnabled === false ? "자막 꺼짐" : "자막 켜짐")}</span><span className="layer-row-time">{formatTime(voiceover.start)}</span>
                   </button>
                 ))}
               </div>
@@ -1070,12 +1162,12 @@ export const TimelineEditor = () => {
               <div className="caption-controls voiceover-controls">
                 <div className="inspector-section-title"><span>{t("AI 음성 클립")}</span><button type="button" className="delete-layer" disabled={rendering || generatingVoice} onClick={deleteSelectedVoiceover}>{t("삭제")}</button></div>
                 <p className="voiceover-text-preview">{selectedVoiceover.text}</p>
+                <p className="linked-caption-note">{t("음성을 이동하면 연결된 자막도 함께 이동합니다.")}</p>
+                <label className="voiceover-caption-toggle"><input type="checkbox" disabled={rendering || generatingVoice} checked={selectedVoiceover.captionEnabled !== false} onChange={(event) => updateVoiceoverCaptionEnabled(selectedVoiceover.id, event.target.checked)} /><span>{t("자막 표시")}</span><small>{t("끄면 자막을 숨기고 설정은 보관합니다.")}</small></label>
                 <audio className="voiceover-audio-preview" controls preload="metadata" src={selectedVoiceover.src} />
                 <div className="inspector-label-row"><span className="inspector-label">{t("시작 시간")}</span><span className="inspector-unit">{t("초")}</span></div>
                 <input className="voiceover-start-input" type="number" min="0" max={Math.max(0, duration - selectedVoiceover.duration)} step="0.1" disabled={rendering || generatingVoice} value={selectedVoiceover.start.toFixed(1)} onChange={(event) => {
-                  const start = clamp(Number(event.target.value), 0, Math.max(0, duration - selectedVoiceover.duration));
-                  setVoiceovers((current) => current.map((voiceover) => voiceover.id === selectedVoiceover.id ? { ...voiceover, start } : voiceover));
-                  clearRendered();
+                  updateVoiceoverStart(selectedVoiceover.id, Number(event.target.value), selectedVoiceover.duration);
                 }} />
                 <label className="voiceover-volume"><span>{t("음량")}</span><input type="range" min="0" max="1" step="0.05" disabled={rendering || generatingVoice} value={selectedVoiceover.volume} onChange={(event) => {
                   const volume = Number(event.target.value);
@@ -1114,23 +1206,27 @@ export const TimelineEditor = () => {
                 </div>
               </div>
             ))}
-            {captions.map((caption, index) => (
-              <div className="timeline-track" key={caption.id}>
+            {captions.map((caption, index) => {
+              const linkedVoiceover = caption.voiceoverId
+                ? voiceovers.find((voiceover) => voiceover.id === caption.voiceoverId)
+                : null;
+              const captionEnabled = linkedVoiceover?.captionEnabled !== false;
+              return <div className="timeline-track" key={caption.id}>
                 <div className="track-name"><span className="track-symbol text-symbol">T</span> {t("텍스트")} {index + 1}</div>
                 <div className="track-lane caption-lane">
-                  <div className={`timeline-caption ${selectedId === caption.id ? "selected" : ""}`} style={{ left: `${(caption.start / duration) * 100}%`, width: `${Math.max(1.5, ((caption.end - caption.start) / duration) * 100)}%` }} onPointerDown={(event) => beginDrag(event, caption, "move")} onClick={(event) => { event.stopPropagation(); selectCaption(caption); }} title={`${caption.text} · ${formatTime(caption.start)}–${formatTime(caption.end)}`}>
-                    <span className="resize-handle left" onPointerDown={(event) => beginDrag(event, caption, "start")} />
-                    <span className="caption-block-label">{caption.text || t("텍스트")}</span>
-                    <span className="resize-handle right" onPointerDown={(event) => beginDrag(event, caption, "end")} />
+                  <div className={`timeline-caption ${caption.voiceoverId ? "linked" : ""} ${caption.voiceoverId && !captionEnabled ? "muted" : ""} ${selectedId === caption.id ? "selected" : ""}`} style={{ left: `${(caption.start / duration) * 100}%`, width: `${Math.max(1.5, ((caption.end - caption.start) / duration) * 100)}%` }} onPointerDown={caption.voiceoverId ? (event) => event.stopPropagation() : (event) => beginDrag(event, caption, "move")} onClick={(event) => { event.stopPropagation(); selectCaption(caption); }} title={`${caption.voiceoverId ? `${t("AI 음성에 연결됨")} · ${captionEnabled ? "" : `${t("자막 꺼짐")} · `}` : ""}${caption.text} · ${formatTime(caption.start)}–${formatTime(caption.end)}`}>
+                    {!caption.voiceoverId && <span className="resize-handle left" onPointerDown={(event) => beginDrag(event, caption, "start")} />}
+                    <span className="caption-block-label">{caption.voiceoverId ? (captionEnabled ? "↔ " : "◌ ") : ""}{caption.text || t("텍스트")}</span>
+                    {!caption.voiceoverId && <span className="resize-handle right" onPointerDown={(event) => beginDrag(event, caption, "end")} />}
                   </div>
                 </div>
-              </div>
-            ))}
+              </div>;
+            })}
             {captions.length === 0 && <div className="timeline-track"><div className="track-name"><span className="track-symbol text-symbol">T</span> {t("텍스트")}</div><div className="track-lane empty-lane">{t("텍스트를 추가하면 여기에 표시됩니다.")}</div></div>}
             <div className="timeline-playhead" style={{ left: `calc(98px + ${(currentFrame / durationInFrames) * Math.max(0, timelineWidth - 98)}px)` }}><span /></div>
           </div>
         </div>
-        <p className="timeline-help"><span>↔</span> {t("영상·이미지·텍스트 막대는 길이와 위치를 조절하고, AI 음성 막대는 타임라인에서 시작 위치를 옮길 수 있습니다.")}</p>
+        <p className="timeline-help"><span>↔</span> {t("영상·이미지·일반 텍스트 막대의 시간을 조절하고, AI 음성 막대를 옮기면 연결된 자막도 함께 이동합니다.")}</p>
       </section>
 
       <div className="render-footer">
